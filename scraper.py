@@ -7,7 +7,7 @@ import re
 import queue
 import threading
 from scrapy.crawler import CrawlerRunner
-from scrapy.utils.project import get_project_settings
+from scrapy.settings import Settings
 from scrapy.linkextractors import LinkExtractor
 from scrapy.spiders import CrawlSpider, Rule
 from scrapy.item import Item, Field
@@ -190,22 +190,93 @@ def _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled,
         while not _scrapy_results_queue.empty():
             _scrapy_results_queue.get_nowait()
 
-        settings = get_project_settings()
-        settings.update({
-            'SCRAPY_RESULTS_QUEUE': _scrapy_results_queue,
+        # Create clean settings without using get_project_settings()
+        settings = Settings()
+        
+        # Base settings that work well with Railway
+        base_settings = {
+            'BOT_NAME': 'travel_scraper',
+            'ROBOTSTXT_OBEY': False,
             'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        })
+            'DOWNLOAD_DELAY': 2,
+            'RANDOMIZE_DOWNLOAD_DELAY': True,
+            'CONCURRENT_REQUESTS': 8,  # Lower for Railway
+            'CONCURRENT_REQUESTS_PER_DOMAIN': 4,
+            'AUTOTHROTTLE_ENABLED': True,
+            'AUTOTHROTTLE_START_DELAY': 1,
+            'AUTOTHROTTLE_MAX_DELAY': 10,
+            'AUTOTHROTTLE_TARGET_CONCURRENCY': 1.0,
+            'DOWNLOAD_TIMEOUT': 60,
+            'RETRY_TIMES': 2,
+            'LOG_LEVEL': 'INFO',
+            
+            # Disable problematic components for Railway
+            'TELNETCONSOLE_ENABLED': False,
+            'STATS_CLASS': 'scrapy.statscollectors.MemoryStatsCollector',
+            
+            # Playwright settings
+            'DOWNLOAD_HANDLERS': {
+                'http': 'scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler',
+                'https': 'scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler',
+            },
+            'TWISTED_REACTOR': 'twisted.internet.asyncioreactor.AsyncioSelectorReactor',
+            'PLAYWRIGHT_LAUNCH_OPTIONS': {
+                'headless': True,
+                'timeout': 20000,
+                'args': [
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor'
+                ]
+            },
+            'PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT': 30000,
+            'PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT': 30000,
+            'PLAYWRIGHT_BROWSER_TYPE': 'chromium',
+            
+            # Pipeline settings
+            'ITEM_PIPELINES': {
+                'my_scraper_project.my_scraper_project.pipelines.JsonWriterPipeline': 300,
+            },
+            
+            # Custom settings
+            'SCRAPY_RESULTS_QUEUE': _scrapy_results_queue,
+            'FEEDS': {},
+            
+            # Headers for better compatibility
+            'DEFAULT_REQUEST_HEADERS': {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en',
+                'Accept-Encoding': 'gzip, deflate',
+            },
+            
+            # Simple extensions only
+            'EXTENSIONS': {
+                'scrapy.extensions.corestats.CoreStats': 500,
+            },
+        }
 
         domain = urlparse(start_urls[0]).netloc if start_urls else ''
-        settings['ALLOWED_DOMAINS'] = [domain] if domain else []
+        if domain:
+            base_settings['ALLOWED_DOMAINS'] = [domain]
         
         # Configure Playwright specific settings for the scrape_mode if needed
         if scrape_mode == 'beautify':
-            settings['PLAYWRIGHT_PROCESS_REQUEST_HEADERS'] = None
-            settings['PLAYWRIGHT_PROCESS_RESPONSE_HEADERS'] = None
+            base_settings['PLAYWRIGHT_PROCESS_REQUEST_HEADERS'] = None
+            base_settings['PLAYWRIGHT_PROCESS_RESPONSE_HEADERS'] = None
 
         if proxy_enabled:
             logger.info("Proxy enabled. Ensure 'PLAYWRIGHT_PROXY' is configured in my_scraper_project/settings.py.")
+            # Add proxy settings if needed
+            # base_settings['PLAYWRIGHT_PROXY'] = {
+            #     'server': 'http://your_proxy_server:port',
+            #     'username': 'proxy_user',
+            #     'password': 'proxy_password',
+            # }
+
+        # Set all settings at once
+        settings.setdict(base_settings)
 
         runner = CrawlerRunner(settings)
         spider_kwargs = {
