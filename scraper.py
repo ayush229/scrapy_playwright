@@ -246,9 +246,9 @@ def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, ca
             logger.info("Proxy enabled. Ensure 'PLAYWRIGHT_PROXY' is configured in Scrapy settings.")
             # Example proxy config if needed:
             # base_settings['PLAYWRIGHT_PROXY'] = {
-            #     'server': 'http://your_proxy_server:port',
-            #     'username': 'proxy_user',
-            #     'password': 'proxy_password',
+            #    'server': 'http://your_proxy_server:port',
+            #    'username': 'proxy_user',
+            #    'password': 'proxy_password',
             # }
 
         settings.setdict(base_settings)
@@ -306,7 +306,9 @@ def _reactor_loop():
     finally:
         # Fire the deferred when the reactor stops (either cleanly or due to error)
         if _reactor_deferred:
-            _reactor_deferred.callback(None) # Signal completion
+            # Check if deferred is not already fired to avoid a RuntimeError
+            if not _reactor_deferred.called:
+                _reactor_deferred.callback(None) # Signal completion
 
 # --- Public API for scraping ---
 def scrape_website(url, type="beautify", proxy_enabled=False, captcha_solver_enabled=False):
@@ -328,45 +330,38 @@ def scrape_website(url, type="beautify", proxy_enabled=False, captcha_solver_ena
     logger.info(f"Initiating scrape_website call for {url} (type: {type})")
     _start_reactor_thread() # Ensure reactor thread is running
 
-    d = threads.deferToThread(lambda: _execute_scrapy_crawl(
+    # Create a Deferred that will represent the completion of this specific crawl.
+    d = Deferred()
+    
+    # Schedule _execute_scrapy_crawl to run in the reactor's thread.
+    # _execute_scrapy_crawl returns a Deferred (because it's an @inlineCallbacks function).
+    # We chain that Deferred's outcome to our 'd' Deferred.
+    reactor.callFromThread(lambda: _execute_scrapy_crawl(
         start_urls=[url],
         scrape_mode=type,
         user_query="", # Not applicable for single scrape_website
         proxy_enabled=proxy_enabled,
         captcha_solver_enabled=captcha_solver_enabled
-    ))
+    ).chainDeferred(d)) # CRUCIAL FIX: Chain the inner Deferred to 'd'
 
     # Wait for the Deferred to complete.
-    # This makes the Flask endpoint 'synchronous' from its perspective,
-    # but the Scrapy execution is asynchronous.
-    # THIS BLOCKS THE FLASK WORKER THREAD. For highly concurrent apps,
-    # consider using Flask's async capabilities or a task queue.
+    completion_event = threading.Event()
+    error_container = [None] # Use a list to allow modification in inner scope
+
+    def _on_crawl_complete(result):
+        completion_event.set()
+        return result
+
+    def _on_crawl_error(failure):
+        error_container[0] = failure.getErrorMessage()
+        logger.error(f"Scrapy crawl failed: {failure.getErrorMessage()}", exc_info=True)
+        completion_event.set()
+        return failure # Re-raise for further handling if needed
+
+    d.addCallback(_on_crawl_complete)
+    d.addErrback(_on_crawl_error)
+
     try:
-        # Use asyncio to await the Twisted Deferred if your Flask app is async.
-        # If your Flask app is synchronous, this is fine, but it will block.
-        # Ensure you have 'twisted.internet.asyncioreactor.AsyncioSelectorReactor' set.
-        # And if not running in an existing asyncio loop, you might need to handle it.
-        # The `deferToThread` already makes it run in a separate thread.
-        # We need a way to 'block' and get the result.
-
-        # The easiest way to block a Flask thread for a Deferred:
-        # We'll use a threading.Event or similar to signal completion and fetch results.
-        completion_event = threading.Event()
-        error_container = [None] # Use a list to allow modification in inner scope
-
-        def _on_crawl_complete(result):
-            completion_event.set()
-            return result
-
-        def _on_crawl_error(failure):
-            error_container[0] = failure.getErrorMessage()
-            logger.error(f"Scrapy crawl failed: {failure.getErrorMessage()}", exc_info=True)
-            completion_event.set()
-            return failure # Re-raise for further handling if needed
-
-        d.addCallback(_on_crawl_complete)
-        d.addErrback(_on_crawl_error)
-
         # Wait for the crawl to complete
         completion_event.wait(timeout=120) # Max 120 seconds to wait for scrape
 
@@ -375,7 +370,7 @@ def scrape_website(url, type="beautify", proxy_enabled=False, captcha_solver_ena
             return {"status": "error", "url": url, "type": type, "error": "Scraping operation timed out."}
 
         if error_container[0]:
-             return {"status": "error", "url": url, "type": type, "error": error_container[0]}
+            return {"status": "error", "url": url, "type": type, "error": error_container[0]}
 
     except Exception as e:
         logger.error(f"Unhandled error during scrape_website execution: {e}", exc_info=True)
@@ -409,13 +404,14 @@ def crawl_website(base_url, type="beautify", user_query="", proxy_enabled=False,
     logger.info(f"Initiating crawl_website call for {base_url} (type: {type})")
     _start_reactor_thread() # Ensure reactor thread is running
 
-    d = threads.deferToThread(lambda: _execute_scrapy_crawl(
+    d = Deferred()
+    reactor.callFromThread(lambda: _execute_scrapy_crawl(
         start_urls=[base_url],
         scrape_mode=type,
         user_query=user_query,
         proxy_enabled=proxy_enabled,
         captcha_solver_enabled=captcha_solver_enabled
-    ))
+    ).chainDeferred(d)) # CRUCIAL FIX: Chain the inner Deferred to 'd'
 
     completion_event = threading.Event()
     error_container = [None]
