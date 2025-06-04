@@ -1,1 +1,1 @@
-web: export PYTHONPATH=.:$PYTHONPATH && python main.py
+web: playwright install chromium && playwright install-deps chromium && export PYTHONPATH=.:$PYTHONPATH && python main.py
