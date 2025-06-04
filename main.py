@@ -1,9 +1,27 @@
 # main.py
+import subprocess
+import sys
+import os
+
+# Install Playwright browsers on Railway
+def install_playwright_browsers():
+    try:
+        if os.environ.get('RAILWAY_ENVIRONMENT'):  # Only on Railway
+            print("Installing Playwright browsers...")
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+            subprocess.run([sys.executable, "-m", "playwright", "install-deps", "chromium"], check=True)
+            print("Playwright browsers installed successfully")
+    except Exception as e:
+        print(f"Warning: Could not install Playwright browsers: {e}")
+
+# Install browsers before importing other modules
+install_playwright_browsers()
+
+# Now import your other modules
 from flask import Flask, request, jsonify, make_response
 from functools import wraps
 from scraper import scrape_website, crawl_website
 import logging
-import os
 from together import Together
 from urllib.parse import urlparse, urljoin
 import uuid
