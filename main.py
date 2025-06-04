@@ -22,11 +22,8 @@ SCRAPED_DATA_DIR = "scraped_content"
 os.makedirs(SCRAPED_DATA_DIR, exist_ok=True)
 
 # --- Initialize Clients and Logging ---
-try:
-    client = Together()
-except Exception as e:
-    print(f"FATAL: Could not initialize Together client. Ensure TOGETHER_API_KEY is set. Error: {e}")
-    client = None
+# Initialize Together client lazily within functions to avoid pickling issues
+_together_client = None # Declare a global variable to hold the client instance
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -62,13 +59,17 @@ def requires_auth(f):
 
 def ask_llama(prompt):
     """Sends a prompt to the Together AI Llama model and returns the response."""
-    if not client:
-        error_message = "LLM client not initialized."
-        logger.error(error_message)
-        print(error_message)
-        return None
+    global _together_client # Indicate that we are modifying the global variable
+    if _together_client is None:
+        try:
+            _together_client = Together()
+        except Exception as e:
+            error_message = f"FATAL: Could not initialize Together client. Ensure TOGETHER_API_KEY is set. Error: {e}"
+            logger.error(error_message)
+            print(error_message)
+            return None
     try:
-        response = client.chat.completions.create(
+        response = _together_client.chat.completions.create(
             model="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
             messages=[{"role": "user", "content": prompt}]
         )
@@ -78,7 +79,7 @@ def ask_llama(prompt):
             logger.warning("LLM response did not contain choices.")
             return None
     except Exception as e:
-        error_message = f"LLM error: {e}\\n{traceback.format_exc()}"
+        error_message = f"LLM error: {e}\n{traceback.format_exc()}"
         logger.error(error_message)
         print(error_message)
         return None
@@ -133,7 +134,7 @@ def find_relevant_content(content_array, query):
         "t", "m", "d", "ll", "re", "ve", "y",
     ])
     # Extract meaningful query tokens (non-stop words)
-    query_tokens = [w.lower() for w in re.findall(r"\\b\\w+\\b", query) if w.isalnum()]
+    query_tokens = [w.lower() for w in re.findall(r"\b\w+\b", query) if w.isalnum()]
     meaningful_query_tokens = {token for token in query_tokens if token not in stop_words}
 
     relevant_content = []
@@ -160,7 +161,7 @@ def find_relevant_content(content_array, query):
         # Check if any meaningful query token is in the page text
         for token in meaningful_query_tokens:
             # Use word boundaries for more precise matching
-            if re.search(r'\\b' + re.escape(token) + r'\\b', page_text_lower):
+            if re.search(r'\b' + re.escape(token) + r'\b', page_text_lower):
                 page_is_relevant = True
                 meaningful_match_found = True
                 break # Found a meaningful match for this page
@@ -182,17 +183,17 @@ def find_relevant_sentences(text_content, query):
 
     # Simple placeholder: return sentences containing any non-stop word from the query
     stop_words = set(["a", "an", "the", "is", "in", "it", "of", "and", "to"]) # simplified list
-    meaningful_query_words = [w.lower() for w in re.findall(r"\\b\\w+\\b", query) if w.lower() not in stop_words]
+    meaningful_query_words = [w.lower() for w in re.findall(r"\b\w+\b", query) if w.lower() not in stop_words]
 
     if not meaningful_query_words:
         return [] # Query only contains stop words
 
-    sentences = re.split(r'(?<=[.!?])\\s+', text_content) # Basic sentence splitting
+    sentences = re.split(r'(?<=[.!?])\s+', text_content) # Basic sentence splitting
     relevant = []
     for sentence in sentences:
         sent_lower = sentence.lower()
         for word in meaningful_query_words:
-            if re.search(r'\\b' + re.escape(word) + r'\\b', sent_lower):
+            if re.search(r'\b' + re.escape(word) + r'\b', sent_lower):
                 relevant.append(sentence.strip())
                 break
     # Limit context size if needed
@@ -291,7 +292,7 @@ def scrape_and_store():
         }), 201 # 201 Created is suitable here
 
     except Exception as e:
-        error_message = f"Internal server error in /scrape_and_store: {str(e)}\\n{traceback.format_exc()}"
+        error_message = f"Internal server error in /scrape_and_store: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_message)
         print(error_message)
         return jsonify({"status": "error", "error": "An internal server error occurred"}), 500
@@ -346,7 +347,7 @@ Website content:
 """
         content_added = False
         for i, content_obj in enumerate(relevant_content_objects):
-            prompt_text += f"\\n--- Content from {{content_obj.get('url', 'Unknown URL')}} ---\\n"
+            prompt_text += f"\n--- Content from {content_obj.get('url', 'Unknown URL')} ---\n"
             if not isinstance(content_obj, dict) or 'content' not in content_obj:
                 logger.warning(f"Skipping invalid content object format during prompt creation: {content_obj}")
                 continue
@@ -355,18 +356,18 @@ Website content:
                 heading = section.get('heading', '') or ""
                 paragraphs = section.get('paragraphs', []) or []
                 if heading:
-                    prompt_text += f"Heading: {{heading}}\\n"
+                    prompt_text += f"Heading: {heading}\n"
                     content_added = True
                 if paragraphs:
-                    prompt_text += "\\n".join(paragraphs) + "\\n"
+                    prompt_text += "\n".join(paragraphs) + "\n"
                     content_added = True
-            prompt_text += "--- End of Content ---\\n"
+            prompt_text += "--- End of Content ---\n"
 
         if not content_added:
              logger.warning(f"Relevant content objects found, but no actual text could be extracted for the prompt (code: {unique_code}).")
              return jsonify({"status": "success", "ai_response": "I cannot provide a helpful response due to an issue processing the stored content.", "ai_used": False})
 
-        # logger.debug(f"Generated LLM Prompt:\\n{{prompt_text}}") # Uncomment for debugging prompts
+        # logger.debug(f"Generated LLM Prompt:\n{prompt_text}") # Uncomment for debugging prompts
 
         ai_response = ask_llama(prompt_text)
 
@@ -375,14 +376,14 @@ Website content:
         is_unhelpful = not ai_response or len(ai_response.strip()) < 15 or any(phrase in ai_response.lower() for phrase in unhelpful_phrases)
 
         if is_unhelpful:
-            logger.info(f"LLM response deemed unhelpful for code {unique_code}, query '{{user_query}}'. Response: '{{ai_response}}'")
+            logger.info(f"LLM response deemed unhelpful for code {unique_code}, query '{user_query}'. Response: '{ai_response}'")
             return jsonify({"status": "success", "ai_response": "I cannot provide a helpful response based on the available information.", "ai_used": True})
         else:
-            logger.info(f"LLM provided a response for code {unique_code}, query '{{user_query}}'.")
+            logger.info(f"LLM provided a response for code {unique_code}, query '{user_query}'.")
             return jsonify({"status": "success", "ai_response": ai_response, "ai_used": True})
 
     except Exception as e:
-        error_message = f"Internal server error in /ask_stored: {str(e)}\\n{traceback.format_exc()}"
+        error_message = f"Internal server error in /ask_stored: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_message)
         print(error_message)
         return jsonify({"status": "error", "error": "An internal server error occurred"}), 500
@@ -424,29 +425,29 @@ def scrape():
         if not urls:
              return jsonify({"status": "error", "error": "No valid URLs provided"}), 400
 
-        logger.info(f"/scrape request - Type: {content_type}, URLs: {urls}, Query: '{{user_query if user_query else 'N/A'}}'")
+        logger.info(f"/scrape request - Type: {content_type}, URLs: {urls}, Query: '{user_query if user_query else 'N/A'}'")
 
         # --- Handle Simple Scrape Types ---
         if content_type in ['raw', 'beautify']:
             all_results = []
             for url in urls:
-                logger.info(f"Scraping {{url}} (type: {{content_type}})")
+                logger.info(f"Scraping {url} (type: {content_type})")
                 result = scrape_website(url, content_type, proxy_enabled, captcha_solver_enabled)
                 if result["status"] == "error":
-                    logger.error(f"Error scraping {{url}}: {{result.get('error', 'Unknown error')}}")
+                    logger.error(f"Error scraping {url}: {result.get('error', 'Unknown error')}")
                     all_results.append({"url": url, "status": "error", "error": result.get('error', 'Unknown error')})
                 else:
                      # Structure the beautify response consistently
                     if content_type == 'beautify' and isinstance(result.get("data"), dict) and "sections" in result.get("data"):
-                         formatted_data = []
-                         for section in result["data"]["sections"]:
-                             heading_data = section.get("heading")
-                             heading_text = heading_data.get("text", "") if isinstance(heading_data, dict) else heading_data
-                             formatted_data.append({
-                                 "heading": heading_text or None,
-                                 "paragraphs": section.get("paragraphs", []) # Changed from content to paragraphs
-                             })
-                         all_results.append({"url": url, "status": "success", "content": formatted_data})
+                        formatted_data = []
+                        for section in result["data"]["sections"]:
+                            heading_data = section.get("heading")
+                            heading_text = heading_data.get("text", "") if isinstance(heading_data, dict) else heading_data
+                            formatted_data.append({
+                                "heading": heading_text or None,
+                                "paragraphs": section.get("paragraphs", []) # Changed from content to paragraphs
+                            })
+                        all_results.append({"url": url, "status": "success", "content": formatted_data})
                     elif content_type == 'beautify' and isinstance(result.get("data"), str): # Handle simple string case for beautify
                          all_results.append({"url": url, "status": "success", "content": [{"heading": None, "paragraphs": [result["data"]]}]})
                     else: # Raw or other beautify cases
@@ -458,16 +459,16 @@ def scrape():
         elif content_type == 'ai':
             if not user_query:
                 return jsonify({"status": "error", "error": "user_query parameter is required for type 'ai'"}), 400
-            if not client:
-                 return jsonify({"status": "error", "error": "AI functionality is not available (client not initialized)."}), 503
+            if _together_client is None: # Check if client could be initialized (lazy check)
+                return jsonify({"status": "error", "error": "AI functionality is not available (client not initialized)."}), 503
 
             combined_text = ""
             errors_encountered = []
             for url in urls:
-                logger.info(f"Scraping {{url}} for AI processing")
+                logger.info(f"Scraping {url} for AI processing")
                 result = scrape_website(url, 'beautify', proxy_enabled, captcha_solver_enabled)
                 if result["status"] == "error":
-                    error_message = f"Error scraping {{url}} for AI: {{result.get('error', 'Unknown error')}}"
+                    error_message = f"Error scraping {url} for AI: {result.get('error', 'Unknown error')}"
                     logger.error(error_message)
                     errors_encountered.append({"url": url, "error": error_message})
                     continue # Skip this URL
@@ -479,14 +480,14 @@ def scrape():
                         heading_text = heading.get("text", "") if isinstance(heading, dict) else heading
                         paragraphs = sec.get("paragraphs", []) # Changed from content to paragraphs
                         if heading_text:
-                            combined_text += f"\\nHeading: {{heading_text}}\\n"
+                            combined_text += f"\nHeading: {heading_text}\n"
                         if paragraphs:
-                            combined_text += "\\n".join(paragraphs) + "\\n"
+                            combined_text += "\n".join(paragraphs) + "\n"
                 elif isinstance(scrape_data, str) and scrape_data:
-                    combined_text += f"\\n{{scrape_data}}\\n"
+                    combined_text += f"\n{scrape_data}\n"
 
             if not combined_text.strip():
-                logger.warning(f"No text content could be extracted from URLs {{urls}} for AI query.")
+                logger.warning(f"No text content could be extracted from URLs {urls} for AI query.")
                 return jsonify({
                     "status": "success",
                     "type": "ai",
@@ -499,7 +500,7 @@ def scrape():
             relevant_sentences = find_relevant_sentences(combined_text, user_query)
 
             if not relevant_sentences:
-                logger.info(f"No relevant sentences found for query '{{user_query}}'.")
+                logger.info(f"No relevant sentences found for query '{user_query}'.")
                 return jsonify({
                     "status": "success",
                     "type": "ai",
@@ -508,16 +509,16 @@ def scrape():
                     "errors": errors_encountered
                 })
             else:
-                logger.info(f"Found {{len(relevant_sentences)}} relevant sentences for AI query.")
-                relevant_content = "\\n".join(relevant_sentences)
+                logger.info(f"Found {len(relevant_sentences)} relevant sentences for AI query.")
+                relevant_content = "\n".join(relevant_sentences)
 
                 # Optional: Truncate context if needed for LLM
                 # MAX_CONTEXT_LEN = 8000 # Example limit
                 # if len(relevant_content) > MAX_CONTEXT_LEN:
-                #     relevant_content = relevant_content[:MAX_CONTEXT_LEN] + "\\n... [truncated]"
+                #    relevant_content = relevant_content[:MAX_CONTEXT_LEN] + "\n... [truncated]"
 
-                ai_prompt = f"""As a knowledgeable agent, please provide a direct and conversational answer to the user's question based *only* on the provided website content below. Do not mention that you are using the provided information. If the answer is not found in the text, state that you cannot provide a helpful response based on the available information. User question: "{{user_query}}" Website content: \"\"\" {{relevant_content}} \"\"\" Answer:"""
-                # logger.debug(f"Generated LLM Prompt (scrape/ai):\\n{{ai_prompt}}") # Uncomment for debugging
+                ai_prompt = f"""As a knowledgeable agent, please provide a direct and conversational answer to the user's question based *only* on the provided website content below. Do not mention that you are using the provided information. If the answer is not found in the text, state that you cannot provide a helpful response based on the available information. User question: "{user_query}" Website content: \"\"\" {relevant_content} \"\"\" Answer:"""
+                # logger.debug(f"Generated LLM Prompt (scrape/ai):\n{ai_prompt}") # Uncomment for debugging
 
                 ai_response = ask_llama(ai_prompt)
 
@@ -525,7 +526,7 @@ def scrape():
                 is_unhelpful = not ai_response or len(ai_response.strip()) < 15 or any(phrase in ai_response.lower() for phrase in unhelpful_phrases)
 
                 if is_unhelpful:
-                    logger.info(f"LLM response deemed unhelpful for scrape/ai query '{{user_query}}'. Response: '{{ai_response}}'")
+                    logger.info(f"LLM response deemed unhelpful for scrape/ai query '{user_query}'. Response: '{ai_response}'")
                     return jsonify({
                         "status": "success",
                         "type": "ai",
@@ -534,7 +535,7 @@ def scrape():
                         "errors": errors_encountered
                     })
                 else:
-                    logger.info(f"LLM provided response for scrape/ai query '{{user_query}}'.")
+                    logger.info(f"LLM provided response for scrape/ai query '{user_query}'.")
                     return jsonify({
                         "status": "success",
                         "type": "ai",
@@ -586,7 +587,7 @@ def scrape():
             elif crawl_mode == "crawl_ai":
                 if not user_query:
                     return jsonify({"status": "error", "error": "user_query parameter is required for type 'crawl_ai'"}), 400
-                if not client:
+                if _together_client is None: # Check if client could be initialized (lazy check)
                     return jsonify({"status": "error", "error": "AI functionality is not available (client not initialized)."}), 503
 
                 all_text_content = ""
@@ -599,19 +600,19 @@ def scrape():
                     processed_urls.add(url)
 
                     if "content" in item:
-                        all_text_content += f"\\n\\n--- Content from {{url}} ---\\n"
+                        all_text_content += f"\n\n--- Content from {url} ---\n"
                         for section in item["content"]:
                             heading = section.get('heading', '') or ""
                             paragraphs = section.get('paragraphs', []) or []
                             if heading:
-                                all_text_content += f"\\nHeading: {{heading}}\\n"
+                                all_text_content += f"\nHeading: {heading}\n"
                             if paragraphs:
-                                all_text_content += "\\n".join(paragraphs) + "\\n"
+                                all_text_content += "\n".join(paragraphs) + "\n"
                     elif "error" in item:
                         crawl_errors.append({"url": url, "error": item["error"]})
 
                 if not all_text_content.strip():
-                    logger.warning(f"No text content could be extracted from crawled URLs starting from {{urls}} for AI query.")
+                    logger.warning(f"No text content could be extracted from crawled URLs starting from {urls} for AI query.")
                     return jsonify({
                         "status": "success",
                         "type": crawl_mode,
@@ -624,7 +625,7 @@ def scrape():
                 relevant_sentences = find_relevant_sentences(all_text_content, user_query)
 
                 if not relevant_sentences:
-                    logger.info(f"No relevant sentences found for query '{{user_query}}' in crawled content.")
+                    logger.info(f"No relevant sentences found for query '{user_query}' in crawled content.")
                     return jsonify({
                         "status": "success",
                         "type": crawl_mode,
@@ -632,27 +633,28 @@ def scrape():
                         "ai_used": False,
                         "errors": crawl_errors
                     })
+                
                 else:
-                    logger.info(f"Found {{len(relevant_sentences)}} relevant sentences from crawl for AI query.")
-                    relevant_content = "\\n".join(relevant_sentences)
+                    logger.info(f"Found {len(relevant_sentences)} relevant sentences from crawl for AI query.")
+                    relevant_content = "\n".join(relevant_sentences)
 
                     # Optional: Truncate context
                     # MAX_CONTEXT_LEN = 8000
                     # if len(relevant_content) > MAX_CONTEXT_LEN:
-                    #     relevant_content = relevant_content[:MAX_CONTEXT_LEN] + "\\n... [truncated]"
+                    #    relevant_content = relevant_content[:MAX_CONTEXT_LEN] + "\n... [truncated]"
 
                     ai_prompt = f"""As a knowledgeable agent, please provide a direct and conversational answer to the user's question based *only* on the provided website content gathered from crawling multiple pages.
 Do not mention that you are using the provided information or that the content comes from multiple pages.
 If the answer is not found in the text, state that you cannot provide a helpful response based on the available information.
-User question: "{{user_query}}"
+User question: "{user_query}"
 
 Website content:
 \"\"\"
-{{relevant_content}}
+{relevant_content}
 \"\"\"
 
 Answer:"""
-                    # logger.debug(f"Generated LLM Prompt (crawl/ai):\\n{{ai_prompt}}") # Uncomment for debugging
+                    # logger.debug(f"Generated LLM Prompt (crawl/ai):\n{ai_prompt}") # Uncomment for debugging
 
                     ai_response = ask_llama(ai_prompt)
 
@@ -660,7 +662,7 @@ Answer:"""
                     is_unhelpful = not ai_response or len(ai_response.strip()) < 15 or any(phrase in ai_response.lower() for phrase in unhelpful_phrases)
 
                     if is_unhelpful:
-                        logger.info(f"LLM response deemed unhelpful for crawl/ai query '{{user_query}}'. Response: '{{ai_response}}'")
+                        logger.info(f"LLM response deemed unhelpful for crawl/ai query '{user_query}'. Response: '{ai_response}'")
                         return jsonify({
                             "status": "success",
                             "type": crawl_mode,
@@ -669,7 +671,7 @@ Answer:"""
                             "errors": crawl_errors
                         })
                     else:
-                        logger.info(f"LLM provided response for crawl/ai query '{{user_query}}'.")
+                        logger.info(f"LLM provided response for crawl/ai query '{user_query}'.")
                         return jsonify({
                             "status": "success",
                             "type": crawl_mode, # Keep original type
@@ -678,13 +680,13 @@ Answer:"""
                             "errors": crawl_errors
                         })
             else: # Fallback for unknown crawl_ type
-                return jsonify({"status": "error", "error": f"Invalid crawl type specified: {{crawl_mode}}"}), 400
+                return jsonify({"status": "error", "error": f"Invalid crawl type specified: {crawl_mode}"}), 400
 
         else: # --- Handle Invalid Type Parameter ---
-            return jsonify({"status": "error", "error": f"Invalid type parameter '{{content_type}}'. Valid types: raw, beautify, ai, crawl_raw, crawl_beautify, crawl_ai."}), 400
+            return jsonify({"status": "error", "error": f"Invalid type parameter '{content_type}'. Valid types: raw, beautify, ai, crawl_raw, crawl_beautify, crawl_ai."}), 400
 
     except Exception as e:
-        error_message = f"Internal server error in /scrape: {str(e)}\\n{traceback.format_exc()}"
+        error_message = f"Internal server error in /scrape: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_message)
         print(error_message)
         return jsonify({"status": "error", "error": "An internal server error occurred"}), 500
@@ -713,15 +715,15 @@ def get_all_agents():
                                 "urls": data.get("urls", [])
                             })
                         else:
-                            logger.warning(f"File {{filename}} does not contain expected agent structure. Skipping.")
+                            logger.warning(f"File {filename} does not contain expected agent structure. Skipping.")
                 except json.JSONDecodeError:
-                    logger.error(f"Could not decode JSON from file: {{filename}}. Skipping.")
+                    logger.error(f"Could not decode JSON from file: {filename}. Skipping.")
                 except Exception as e:
-                    logger.error(f"Error reading or processing file {{filename}}: {{e}}. Skipping.")
-        logger.info(f"Returning {{len(agents)}} agents.")
+                    logger.error(f"Error reading or processing file {filename}: {e}. Skipping.")
+        logger.info(f"Returning {len(agents)} agents.")
         return jsonify({"status": "success", "agents": agents})
     except Exception as e:
-        error_message = f"Internal server error in /agents: {str(e)}\\n{traceback.format_exc()}"
+        error_message = f"Internal server error in /agents: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_message)
         print(error_message)
         return jsonify({"status": "error", "error": "An internal server error occurred"}), 500
@@ -770,7 +772,7 @@ def update_agent(unique_code):
         new_urls = [url.strip() for url in urls_str.split(',') if url.strip()]
         if not new_urls:
             return jsonify({"status": "error", "error": "No valid new URLs provided"}), 400
-        logger.info(f"Update request for agent '{{original_agent_name}}' ({{unique_code}}) with new URLs: {{new_urls}}")
+        logger.info(f"Update request for agent '{original_agent_name}' ({unique_code}) with new URLs: {new_urls}")
     except Exception as e:
         logger.error(f"Error parsing JSON for agent update {unique_code}: {e}")
         return jsonify({"status": "error", "error": "Invalid JSON payload for update"}), 400
@@ -782,10 +784,10 @@ def update_agent(unique_code):
     current_scrape_errors = []
 
     for url in urls_to_scrape:
-        logger.info(f"Updating agent {unique_code}: Scraping {{url}}")
+        logger.info(f"Updating agent {unique_code}: Scraping {url}")
         result = scrape_website(url, 'beautify', proxy_enabled, captcha_solver_enabled) # Pass new args
         if result["status"] == "error":
-            error_message = f"Error scraping {{url}} during update: {{result.get('error', 'Unknown error')}}"
+            error_message = f"Error scraping {url} during update: {result.get('error', 'Unknown error')}"
             logger.error(error_message)
             current_scrape_errors.append({"url": url, "error": result.get('error', 'Unknown error')})
             continue # Continue with other URLs
@@ -820,14 +822,14 @@ def update_agent(unique_code):
     try:
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(updated_data_to_store, f, ensure_ascii=False, indent=4)
-        logger.info(f"Successfully updated agent '{{original_agent_name}}' with code {unique_code}.")
+        logger.info(f"Successfully updated agent '{original_agent_name}' with code {unique_code}.")
         return jsonify({
             "status": "success",
             "unique_code": unique_code,
             "agent_name": original_agent_name,
             "newly_scraped_urls": [res["url"] for res in current_scrape_results],
             "new_scrape_errors": current_scrape_errors,
-            "message": f"Agent {{original_agent_name}} updated successfully with new URLs."
+            "message": f"Agent {original_agent_name} updated successfully with new URLs."
         }), 200
 
     except Exception as e:
@@ -856,7 +858,7 @@ def delete_agent(unique_code):
         print(error_message)
         return jsonify({"status": "error", "error": "Failed to delete agent data file"}), 500
     except Exception as e:
-        error_message = f"Unexpected error during agent deletion {unique_code}: {e}\\n{traceback.format_exc()}"
+        error_message = f"Unexpected error during agent deletion {unique_code}: {e}\n{traceback.format_exc()}"
         logger.error(error_message)
         print(error_message)
         return jsonify({"status": "error", "error": "An unexpected error occurred during deletion"}), 500
