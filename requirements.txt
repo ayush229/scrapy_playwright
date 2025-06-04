@@ -7,3 +7,5 @@ Flask-Cors==4.0.0
 scrapy==2.11.1
 playwright==1.44.0
 scrapy-playwright==0.0.30
+twisted==23.10.0
+pyopenssl==23.3.0
