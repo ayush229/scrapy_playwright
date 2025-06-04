@@ -1,4 +1,3 @@
-# scraper.py
 import requests
 from bs4 import BeautifulSoup
 import logging
@@ -12,15 +11,31 @@ from scrapy.linkextractors import LinkExtractor
 from scrapy.spiders import CrawlSpider, Rule
 from scrapy.item import Item, Field
 from scrapy import Request
-from twisted.internet import reactor, defer
-from twisted.internet.defer import inlineCallbacks
-import asyncio
-# from playwright.sync_api import sync_playwright # Not directly used in _run_scrapy_spider call
+from twisted.internet import reactor, defer, threads # Import threads from twisted
+from twisted.internet.defer import inlineCallbacks, Deferred # Also import Deferred
 
 logger = logging.getLogger(__name__)
 
 # This queue will hold results from Scrapy and be read by scraper.py
 _scrapy_results_queue = queue.Queue()
+
+# --- Global state for managing the reactor ---
+# We'll use a lock to ensure only one thread manages the reactor state
+_reactor_lock = threading.Lock()
+_reactor_thread = None
+_reactor_deferred = None # To hold the deferred that completes when the reactor stops
+
+# --- Pipeline to put items into the queue ---
+# You need to make sure this pipeline is correctly defined in your project structure
+# For simplicity, I'm defining a barebones one here.
+# Assuming 'my_scraper_project/my_scraper_project/pipelines.py' exists and has JsonWriterPipeline
+# If not, create that file and define the pipeline there.
+class JsonWriterPipeline:
+    def process_item(self, item, spider):
+        if spider.settings.get('SCRAPY_RESULTS_QUEUE'):
+            spider.settings['SCRAPY_RESULTS_QUEUE'].put(dict(item)) # Convert Item to dict
+        return item
+# -----------------------------------------------
 
 class ScrapedItem(Item):
     url = Field()
@@ -30,78 +45,40 @@ class ScrapedItem(Item):
 
 class GenericSpider(CrawlSpider):
     name = 'generic_spider'
-    custom_settings = {
-        'ROBOTSTXT_OBEY': False,
-        'DOWNLOAD_TIMEOUT': 60, # Increased timeout for Playwright
-        'FEEDS': {}, # No direct feed output, use pipeline
-        'ITEM_PIPELINES': {
-            'my_scraper_project.my_scraper_project.pipelines.JsonWriterPipeline': 300,
-        },
-        'DOWNLOAD_HANDLERS': {
-            'http': 'scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler',
-            'https': 'scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler',
-        },
-        'TWISTED_REACTOR': 'twisted.internet.asyncioreactor.AsyncioSelectorReactor', # Scrapy's way of integrating with asyncio
-        'PLAYWRIGHT_LAUNCH_OPTIONS': {
-            'headless': True, # Run Playwright in headless mode
-            'timeout': 20000, # 20 seconds
-        },
-        'PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT': 30000, # 30 seconds
-        'PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT': 30000, # 30 seconds
-        'PLAYWRIGHT_BROWSER_TYPE': 'chromium', # or 'firefox', 'webkit'
-        # 'PLAYWRIGHT_PROXY': { # Example proxy configuration for Playwright directly
-        #     'server': 'http://your_proxy_server:port',
-        #     'username': 'proxy_user',
-        #     'password': 'proxy_password',
-        #     'no_proxy': ['localhost', '127.0.0.1']
-        # },
-        # Add a custom setting to pass the queue
-        'SCRAPY_RESULTS_QUEUE': None, # This will be updated dynamically by _run_scrapy_spider
-    }
+    # custom_settings will be overridden by the Settings object passed to CrawlerRunner
+    # but it's good practice to keep common settings here for readability if needed
+    # (though in our setup, settings are built dynamically in _run_scrapy_spider_async)
 
     rules = (
+        # LinkExtractor will be updated dynamically in __init__
         Rule(LinkExtractor(deny_domains=['google.com', 'facebook.com', 'twitter.com']), callback='parse_item', follow=True),
     )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.scrape_mode = kwargs.get('scrape_mode', 'beautify')
-        self.user_query = kwargs.get('user_query', '') # For crawl_ai, if spider needs to know query
+        self.user_query = kwargs.get('user_query', '')
         self.domain = kwargs.get('domain', '')
         self.proxy_enabled = kwargs.get('proxy_enabled', False)
         self.captcha_solver_enabled = kwargs.get('captcha_solver_enabled', False)
-        
+
         # Adjust allowed_domains dynamically based on start_urls
         if self.start_urls:
             parsed_start_url = urlparse(self.start_urls[0])
             self.domain = parsed_start_url.netloc
             self.allowed_domains = [self.domain] if self.domain else []
-            # Update rules with dynamic allowed_domains for LinkExtractor if needed
             self.rules = (
                 Rule(LinkExtractor(allow_domains=self.allowed_domains, deny_domains=['google.com', 'facebook.com', 'twitter.com', 'linkedin.com']), callback='parse_item', follow=True),
             )
 
-        # Enable proxy middleware if configured
-        if self.proxy_enabled:
-            # Note: For Playwright's actual proxying, the 'PLAYWRIGHT_PROXY' setting is key.
-            # This middleware is more for standard HTTP requests if you were using requests.get directly or
-            # if you had a custom proxy rotation logic not tied to Playwright's built-in proxy.
-            # For simplicity, we'll indicate if it needs to be uncommented in settings.py.
-            if 'DOWNLOADER_MIDDLEWARES' not in self.custom_settings:
-                self.custom_settings['DOWNLOADER_MIDDLEWARES'] = {}
-            self.custom_settings['DOWNLOADER_MIDDLEWARES']['my_scraper_project.my_scraper_project.middlewares.ProxyMiddleware'] = 543
-            logger.info("Proxy enabled. Remember to configure PLAYWRIGHT_PROXY in settings.py for Playwright requests.")
-
-        if self.captcha_solver_enabled:
-            if 'DOWNLOADER_MIDDLEWARES' not in self.custom_settings:
-                self.custom_settings['DOWNLOADER_MIDDLEWARES'] = {}
-            self.custom_settings['DOWNLOADER_MIDDLEWARES']['my_scraper_project.my_scraper_project.middlewares.CaptchaSolverMiddleware'] = 544
-
+        # These settings are now largely handled by the settings object passed to CrawlerRunner
+        # but you can use them here for spider-specific overrides if necessary.
+        # Ensure your custom_settings are merged/applied correctly.
+        # The key is that `SCRAPY_RESULTS_QUEUE` is set in the `Settings` object passed to `CrawlerRunner`.
 
     def start_requests(self):
-        # Requests will be handled by Playwright by default due to settings
         for url in self.start_urls:
-            yield Request(url, meta={'playwright': True})
+            yield Request(url, meta={'playwright': True}) # Request will be handled by Playwright
 
     def parse_item(self, response):
         item = ScrapedItem()
@@ -118,13 +95,11 @@ class GenericSpider(CrawlSpider):
             soup = BeautifulSoup(response.text, 'html.parser')
             content_sections = []
 
-            sections = soup.find_all(['section', 'div', 'article', 'main', 'body']) 
-            
-            if not sections and soup.body: # Fallback if specific sections are not found, use whole body
-                sections = [soup.body] 
-            elif not sections: # If no body either, just use the soup object directly
+            sections = soup.find_all(['section', 'div', 'article', 'main', 'body'])
+            if not sections and soup.body:
+                sections = [soup.body]
+            elif not sections:
                 sections = [soup]
-
 
             for sec in sections:
                 section_data = {
@@ -133,7 +108,7 @@ class GenericSpider(CrawlSpider):
                     "images": [],
                     "links": []
                 }
-                
+
                 heading_tags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
                 found_heading = None
                 for tag_name in heading_tags:
@@ -143,10 +118,10 @@ class GenericSpider(CrawlSpider):
                         break
                 section_data["heading"] = found_heading
 
-                paragraphs = sec.find_all(['p', 'li', 'span', 'div']) # Broaden paragraph search
+                paragraphs = sec.find_all(['p', 'li', 'span', 'div'])
                 for p in paragraphs:
                     text = p.get_text(strip=True)
-                    if text and len(text) > 5: # Filter out very short or empty strings
+                    if text and len(text) > 5:
                         section_data["paragraphs"].append(text)
 
                 for img in sec.find_all("img"):
@@ -164,7 +139,7 @@ class GenericSpider(CrawlSpider):
                 if section_data["heading"] or section_data["paragraphs"] or section_data["images"] or section_data["links"]:
                     content_sections.append(section_data)
 
-            # Final fallback if no structured content was found but general text exists
+            # Final fallback
             if not content_sections and soup.get_text(strip=True):
                 content_sections.append({
                     "heading": None,
@@ -172,35 +147,35 @@ class GenericSpider(CrawlSpider):
                     "images": [],
                     "links": []
                 })
-            
+
             item['content'] = { "sections": content_sections }
             yield item
 
         except Exception as e:
-            logger.error(f"Error parsing HTML for {response.url}: {e}")
+            logger.error(f"Error parsing HTML for {response.url}: {e}", exc_info=True)
             item['error'] = str(e)
             yield item
 
-
+# --- Async Scrapy Runner within Twisted's reactor ---
 @inlineCallbacks
-def _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled):
-    """Helper to run Scrapy spider asynchronously."""
+def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled):
+    """
+    Executes a single Scrapy crawl within the Twisted reactor.
+    This function should be called within the reactor's thread.
+    """
+    logger.info(f"Executing Scrapy crawl for {start_urls} in reactor thread.")
     try:
-        # Clear the queue before a new run
-        while not _scrapy_results_queue.empty():
-            _scrapy_results_queue.get_nowait()
-
-        # Create clean settings without using get_project_settings()
+        # Create a new Settings object for each run
         settings = Settings()
-        
-        # Base settings that work well with Railway
+
+        # Base settings
         base_settings = {
             'BOT_NAME': 'travel_scraper',
             'ROBOTSTXT_OBEY': False,
             'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'DOWNLOAD_DELAY': 2,
             'RANDOMIZE_DOWNLOAD_DELAY': True,
-            'CONCURRENT_REQUESTS': 8,  # Lower for Railway
+            'CONCURRENT_REQUESTS': 8,
             'CONCURRENT_REQUESTS_PER_DOMAIN': 4,
             'AUTOTHROTTLE_ENABLED': True,
             'AUTOTHROTTLE_START_DELAY': 1,
@@ -209,11 +184,11 @@ def _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled,
             'DOWNLOAD_TIMEOUT': 60,
             'RETRY_TIMES': 2,
             'LOG_LEVEL': 'INFO',
-            
-            # Disable problematic components for Railway
+
+            # Disable problematic components for Railway/headless
             'TELNETCONSOLE_ENABLED': False,
             'STATS_CLASS': 'scrapy.statscollectors.MemoryStatsCollector',
-            
+
             # Playwright settings
             'DOWNLOAD_HANDLERS': {
                 'http': 'scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler',
@@ -221,11 +196,11 @@ def _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled,
             },
             'TWISTED_REACTOR': 'twisted.internet.asyncioreactor.AsyncioSelectorReactor',
             'PLAYWRIGHT_LAUNCH_OPTIONS': {
-                'headless': True,
+                'headless': True, # CRUCIAL for server environments
                 'timeout': 20000,
                 'args': [
-                    '--no-sandbox',
-                    '--disable-dev-shm-usage',
+                    '--no-sandbox', # Required for Docker environments
+                    '--disable-dev-shm-usage', # Recommended for Docker
                     '--disable-gpu',
                     '--disable-web-security',
                     '--disable-features=VizDisplayCompositor'
@@ -233,24 +208,26 @@ def _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled,
             },
             'PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT': 30000,
             'PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT': 30000,
-            'PLAYWRIGHT_BROWSER_TYPE': 'chromium',
-            
-            # Pipeline settings
+            'PLAYWRIGHT_BROWSER_TYPE': 'chromium', # or 'firefox', 'webkit'
+
+            # Pipeline settings: Ensure this points to where your pipeline is defined
             'ITEM_PIPELINES': {
-                'my_scraper_project.my_scraper_project.pipelines.JsonWriterPipeline': 300,
+                'scraper.JsonWriterPipeline': 300, # Assuming JsonWriterPipeline is in scraper.py
+                # If your pipeline is in 'my_scraper_project/my_scraper_project/pipelines.py':
+                # 'my_scraper_project.my_scraper_project.pipelines.JsonWriterPipeline': 300,
             },
-            
+
             # Custom settings
-            'SCRAPY_RESULTS_QUEUE': _scrapy_results_queue,
+            'SCRAPY_RESULTS_QUEUE': _scrapy_results_queue, # Pass the queue to pipeline
             'FEEDS': {},
-            
+
             # Headers for better compatibility
             'DEFAULT_REQUEST_HEADERS': {
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en',
                 'Accept-Encoding': 'gzip, deflate',
             },
-            
+
             # Simple extensions only
             'EXTENSIONS': {
                 'scrapy.extensions.corestats.CoreStats': 500,
@@ -260,24 +237,27 @@ def _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled,
         domain = urlparse(start_urls[0]).netloc if start_urls else ''
         if domain:
             base_settings['ALLOWED_DOMAINS'] = [domain]
-        
-        # Configure Playwright specific settings for the scrape_mode if needed
+
         if scrape_mode == 'beautify':
             base_settings['PLAYWRIGHT_PROCESS_REQUEST_HEADERS'] = None
             base_settings['PLAYWRIGHT_PROCESS_RESPONSE_HEADERS'] = None
 
         if proxy_enabled:
-            logger.info("Proxy enabled. Ensure 'PLAYWRIGHT_PROXY' is configured in my_scraper_project/settings.py.")
-            # Add proxy settings if needed
+            logger.info("Proxy enabled. Ensure 'PLAYWRIGHT_PROXY' is configured in Scrapy settings.")
+            # Example proxy config if needed:
             # base_settings['PLAYWRIGHT_PROXY'] = {
             #     'server': 'http://your_proxy_server:port',
             #     'username': 'proxy_user',
             #     'password': 'proxy_password',
             # }
 
-        # Set all settings at once
         settings.setdict(base_settings)
+        # Configure logging for Scrapy specifically
+        from scrapy.utils.log import configure_logging
+        configure_logging(settings)
 
+
+        # Instantiate CrawlerRunner with the dynamically created settings
         runner = CrawlerRunner(settings)
         spider_kwargs = {
             'start_urls': start_urls,
@@ -287,76 +267,51 @@ def _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled,
             'proxy_enabled': proxy_enabled,
             'captcha_solver_enabled': captcha_solver_enabled
         }
-        
-        yield runner.crawl(GenericSpider, **spider_kwargs)
-        
-    except Exception as e:
-        logger.error(f"Error running Scrapy spider: {e}", exc_info=True)
 
-
-def _run_scrapy_spider_in_thread(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled):
-    """Helper to run Scrapy process in a separate thread using reactor."""
-    try:
-        # Check if reactor is already running
-        if reactor.running:
-            # If reactor is running, we need to use it differently
-            d = _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled)
-            return d
-        else:
-            # Start the reactor in this thread
-            def run_spider():
-                d = _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled)
-                d.addBoth(lambda _: reactor.stop())
-                return d
-            
-            reactor.callWhenRunning(run_spider)
-            reactor.run(installSignalHandlers=False)
-            
-    except Exception as e:
-        logger.error(f"Error running Scrapy spider in thread: {e}", exc_info=True)
-
-
-def _run_scrapy_spider(start_urls, scrape_mode="beautify", user_query="", proxy_enabled=False, captcha_solver_enabled=False):
-    """
-    Synchronous wrapper to run the Scrapy spider and collect results.
-    Returns:
-        list: A list of dictionaries, each representing a scraped item.
-    """
-    try:
-        # Method 1: Try running without threading first (simpler approach)
-        if not reactor.running:
-            def run_and_stop():
-                d = _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled)
-                d.addBoth(lambda _: reactor.stop())
-                return d
-            
-            # Clear the queue before starting
-            while not _scrapy_results_queue.empty():
-                _scrapy_results_queue.get_nowait()
-                
-            reactor.callWhenRunning(run_and_stop)
-            reactor.run(installSignalHandlers=False)
-        else:
-            # If reactor is already running, we need a different approach
-            logger.warning("Reactor already running. Using alternative approach.")
-            # You might need to implement a different strategy here
-            # For now, return empty results with an error
-            return []
-        
-        # Collect results
-        results = []
+        # Clear the queue before a new run
         while not _scrapy_results_queue.empty():
-            results.append(_scrapy_results_queue.get_nowait())
-        return results
-        
+            _scrapy_results_queue.get_nowait()
+
+        # Yield the Deferred from runner.crawl
+        yield runner.crawl(GenericSpider, **spider_kwargs)
+        logger.info(f"Scrapy crawl for {start_urls} finished successfully.")
+
     except Exception as e:
-        logger.error(f"Error in _run_scrapy_spider: {e}", exc_info=True)
-        return []
+        logger.error(f"Error during Scrapy crawl execution: {e}", exc_info=True)
+        # Propagate the error so the calling Deferred can handle it
+        raise # Re-raise the exception after logging
 
+# --- Reactor Management Thread ---
+def _start_reactor_thread():
+    """Starts the Twisted reactor in a dedicated thread."""
+    global _reactor_thread, _reactor_deferred
 
+    with _reactor_lock:
+        if _reactor_thread is None or not _reactor_thread.is_alive():
+            # Create a Deferred that will fire when the reactor stops
+            _reactor_deferred = Deferred()
+            _reactor_thread = threading.Thread(target=_reactor_loop, daemon=True)
+            _reactor_thread.start()
+            logger.info("Twisted reactor started in a separate thread.")
+        else:
+            logger.info("Twisted reactor thread already running.")
+
+def _reactor_loop():
+    """The main loop for the Twisted reactor, to be run in a separate thread."""
+    global _reactor_deferred
+    try:
+        reactor.run(installSignalHandlers=False) # Do not install signal handlers in a sub-thread
+    except Exception as e:
+        logger.error(f"Error in reactor thread: {e}", exc_info=True)
+    finally:
+        # Fire the deferred when the reactor stops (either cleanly or due to error)
+        if _reactor_deferred:
+            _reactor_deferred.callback(None) # Signal completion
+
+# --- Public API for scraping ---
 def scrape_website(url, type="beautify", proxy_enabled=False, captcha_solver_enabled=False):
     """
-    Scrapes a single website using Scrapy/Playwright.
+    Scrapes a single website using Scrapy/Playwright in a non-blocking manner.
     Args:
         url (str): The URL to scrape.
         type (str): 'raw' for raw HTML, 'beautify' for structured content.
@@ -368,19 +323,74 @@ def scrape_website(url, type="beautify", proxy_enabled=False, captcha_solver_ena
             - "url": The URL that was scraped.
             - "type": The type of scrape performed.
             - "data": (If status is "success") The scraped content.
-                      If type is a beautify, this is a dictionary with 'sections'.
             - "error": (Only present if status is "error") A string describing the error.
     """
-    logger.info(f"Synchronous scrape_website call for {url} (type: {type})")
-    scraped_items = _run_scrapy_spider(
+    logger.info(f"Initiating scrape_website call for {url} (type: {type})")
+    _start_reactor_thread() # Ensure reactor thread is running
+
+    d = threads.deferToThread(lambda: _execute_scrapy_crawl(
         start_urls=[url],
         scrape_mode=type,
+        user_query="", # Not applicable for single scrape_website
         proxy_enabled=proxy_enabled,
         captcha_solver_enabled=captcha_solver_enabled
-    )
+    ))
 
-    if scraped_items:
-        first_item = scraped_items[0] # Assuming only one item for single URL scrape
+    # Wait for the Deferred to complete.
+    # This makes the Flask endpoint 'synchronous' from its perspective,
+    # but the Scrapy execution is asynchronous.
+    # THIS BLOCKS THE FLASK WORKER THREAD. For highly concurrent apps,
+    # consider using Flask's async capabilities or a task queue.
+    try:
+        # Use asyncio to await the Twisted Deferred if your Flask app is async.
+        # If your Flask app is synchronous, this is fine, but it will block.
+        # Ensure you have 'twisted.internet.asyncioreactor.AsyncioSelectorReactor' set.
+        # And if not running in an existing asyncio loop, you might need to handle it.
+        # The `deferToThread` already makes it run in a separate thread.
+        # We need a way to 'block' and get the result.
+
+        # The easiest way to block a Flask thread for a Deferred:
+        # We'll use a threading.Event or similar to signal completion and fetch results.
+        completion_event = threading.Event()
+        error_container = [None] # Use a list to allow modification in inner scope
+
+        def _on_crawl_complete(result):
+            completion_event.set()
+            return result
+
+        def _on_crawl_error(failure):
+            error_container[0] = failure.getErrorMessage()
+            logger.error(f"Scrapy crawl failed: {failure.getErrorMessage()}", exc_info=True)
+            completion_event.set()
+            return failure # Re-raise for further handling if needed
+
+        d.addCallback(_on_crawl_complete)
+        d.addErrback(_on_crawl_error)
+
+        # Wait for the crawl to complete
+        completion_event.wait(timeout=120) # Max 120 seconds to wait for scrape
+
+        if not completion_event.is_set():
+            logger.error(f"Scrapy crawl for {url} timed out after 120 seconds.")
+            return {"status": "error", "url": url, "type": type, "error": "Scraping operation timed out."}
+
+        if error_container[0]:
+             return {"status": "error", "url": url, "type": type, "error": error_container[0]}
+
+    except Exception as e:
+        logger.error(f"Unhandled error during scrape_website execution: {e}", exc_info=True)
+        return {"status": "error", "url": url, "type": type, "error": str(e)}
+
+    # Collect results after the crawl is confirmed complete
+    results = []
+    while not _scrapy_results_queue.empty():
+        try:
+            results.append(_scrapy_results_queue.get_nowait())
+        except queue.Empty:
+            break # Should not happen if completion_event is set after results are put
+
+    if results:
+        first_item = results[0]
         if first_item.get('error'):
             return {"status": "error", "url": url, "type": type, "error": first_item['error']}
         elif type == 'raw':
@@ -388,42 +398,68 @@ def scrape_website(url, type="beautify", proxy_enabled=False, captcha_solver_ena
         else: # beautify
             return {"status": "success", "url": url, "type": type, "data": first_item.get('content')}
     else:
-        return {"status": "error", "url": url, "type": type, "error": "No data scraped or unknown error."}
+        return {"status": "error", "url": url, "type": type, "error": "No data scraped or unknown error. Check Scrapy logs for details."}
 
 
 def crawl_website(base_url, type="beautify", user_query="", proxy_enabled=False, captcha_solver_enabled=False):
     """
-    Crawls a website using Scrapy/Playwright.
-    Args:
-        base_url (str): The starting URL for the crawl.
-        type (str): 'raw' for raw HTML, 'beautify' for structured content.
-        user_query (str): User query for 'crawl_ai' type.
-        proxy_enabled (bool): Whether to use proxies.
-        captcha_solver_enabled (bool): Whether to enable captcha solving.
-    Returns:
-        list: A list of dictionaries, each representing a crawled page
-              (containing 'url', 'content'/'raw_data', or 'error').
+    Crawl multiple pages from a website using Scrapy/Playwright.
+    This function has similar blocking characteristics to scrape_website.
     """
-    logger.info(f"Synchronous crawl_website call for {base_url} (type: {type})")
-    
-    # Scrapy will handle the crawling and link extraction based on GenericSpider's rules.
-    scraped_items = _run_scrapy_spider(
+    logger.info(f"Initiating crawl_website call for {base_url} (type: {type})")
+    _start_reactor_thread() # Ensure reactor thread is running
+
+    d = threads.deferToThread(lambda: _execute_scrapy_crawl(
         start_urls=[base_url],
         scrape_mode=type,
         user_query=user_query,
         proxy_enabled=proxy_enabled,
         captcha_solver_enabled=captcha_solver_enabled
-    )
+    ))
+
+    completion_event = threading.Event()
+    error_container = [None]
+
+    def _on_crawl_complete(result):
+        completion_event.set()
+        return result
+
+    def _on_crawl_error(failure):
+        error_container[0] = failure.getErrorMessage()
+        logger.error(f"Scrapy crawl failed: {failure.getErrorMessage()}", exc_info=True)
+        completion_event.set()
+        return failure
+
+    d.addCallback(_on_crawl_complete)
+    d.addErrback(_on_crawl_error)
+
+    try:
+        completion_event.wait(timeout=300) # Max 300 seconds for a crawl
+
+        if not completion_event.is_set():
+            logger.error(f"Scrapy crawl for {base_url} timed out after 300 seconds.")
+            return {"status": "error", "url": base_url, "type": type, "error": "Crawling operation timed out."}
+
+        if error_container[0]:
+            return {"status": "error", "url": base_url, "type": type, "error": error_container[0]}
+
+    except Exception as e:
+        logger.error(f"Unhandled error during crawl_website execution: {e}", exc_info=True)
+        return {"status": "error", "url": base_url, "type": type, "error": str(e)}
 
     all_data = []
-    for item in scraped_items:
-        page_data = {"url": item.get('url')}
-        if item.get('error'):
-            page_data["error"] = item['error']
-        elif type == 'raw':
-            page_data["raw_data"] = item.get('raw_data')
-        else: # beautify
-            page_data["content"] = item.get('content', {}).get('sections', [])
-        all_data.append(page_data)
+    while not _scrapy_results_queue.empty():
+        try:
+            item = _scrapy_results_queue.get_nowait()
+            page_data = {"url": item.get('url')}
+            if item.get('error'):
+                page_data["error"] = item['error']
+            elif type == 'raw':
+                page_data["raw_data"] = item.get('raw_data')
+            else: # beautify
+                page_data["content"] = item.get('content', {}).get('sections', [])
+            all_data.append(page_data)
+        except queue.Empty:
+            break
 
     return all_data
