@@ -896,14 +896,18 @@ def get_stored_file(unique_code):
 
 # --- Main Execution ---
 if __name__ == '__main__':
-    print(f"Starting Flask server on host 0.0.0.0 port 5000")
+    # Get the port from the environment variable, defaulting to 8080 for Railway
+    # Railway sets the PORT environment variable to 8080 by default.
+    # Using 8080 as the fallback is best practice for Railway deployments.
+    port = int(os.environ.get("PORT", 8080))
+
+    print(f"Starting Flask server on host 0.0.0.0 port {port}") # Updated print statement
     print(f"Serving scraped data from: {os.path.abspath(SCRAPED_DATA_DIR)}")
-    # app.run(debug=True, host='0.0.0.0', port=5000) # For local development
-    # Using waitress for production deployment
+
     try:
         from waitress import serve
-        serve(app, host="0.0.0.0", port=os.environ.get("PORT", 5000))
+        serve(app, host="0.0.0.0", port=port) # Use the 'port' variable here
     except ImportError:
         print("Waitress not found, falling back to Flask's default development server.")
         print("For production, consider installing waitress: pip install waitress")
-        app.run(debug=True, host='0.0.0.0', port=os.environ.get("PORT", 5000))
+        app.run(debug=True, host='0.0.0.0', port=port) # Use the 'port' variable here
