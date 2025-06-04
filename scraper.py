@@ -6,12 +6,15 @@ from urllib.parse import urlparse, urljoin
 import re
 import queue
 import threading
-from scrapy.crawler import CrawlerProcess
+from scrapy.crawler import CrawlerRunner
 from scrapy.utils.project import get_project_settings
 from scrapy.linkextractors import LinkExtractor
 from scrapy.spiders import CrawlSpider, Rule
 from scrapy.item import Item, Field
 from scrapy import Request
+from twisted.internet import reactor, defer
+from twisted.internet.defer import inlineCallbacks
+import asyncio
 # from playwright.sync_api import sync_playwright # Not directly used in _run_scrapy_spider call
 
 logger = logging.getLogger(__name__)
@@ -179,16 +182,17 @@ class GenericSpider(CrawlSpider):
             yield item
 
 
-def _run_scrapy_spider_in_thread(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled):
-    """Helper to run Scrapy process in a separate thread."""
+@inlineCallbacks
+def _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled):
+    """Helper to run Scrapy spider asynchronously."""
     try:
-        # Clear the queue before a new run for this thread
+        # Clear the queue before a new run
         while not _scrapy_results_queue.empty():
             _scrapy_results_queue.get_nowait()
 
         settings = get_project_settings()
         settings.update({
-            'SCRAPY_RESULTS_QUEUE': _scrapy_results_queue, # Pass the queue to settings
+            'SCRAPY_RESULTS_QUEUE': _scrapy_results_queue,
             'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         })
 
@@ -197,18 +201,13 @@ def _run_scrapy_spider_in_thread(start_urls, scrape_mode, user_query, proxy_enab
         
         # Configure Playwright specific settings for the scrape_mode if needed
         if scrape_mode == 'beautify':
-            # These are usually default, but good to be explicit for Playwright rendering
             settings['PLAYWRIGHT_PROCESS_REQUEST_HEADERS'] = None
             settings['PLAYWRIGHT_PROCESS_RESPONSE_HEADERS'] = None
-        else: # raw or other modes where Playwright is used primarily for rendering
-            pass
 
-        # Proxy handling is mostly via Playwright settings or custom middlewares.
-        # For a truly copy-paste solution, recommend modifying settings.py directly for proxy.
         if proxy_enabled:
             logger.info("Proxy enabled. Ensure 'PLAYWRIGHT_PROXY' is configured in my_scraper_project/settings.py.")
 
-        process = CrawlerProcess(settings)
+        runner = CrawlerRunner(settings)
         spider_kwargs = {
             'start_urls': start_urls,
             'scrape_mode': scrape_mode,
@@ -217,30 +216,71 @@ def _run_scrapy_spider_in_thread(start_urls, scrape_mode, user_query, proxy_enab
             'proxy_enabled': proxy_enabled,
             'captcha_solver_enabled': captcha_solver_enabled
         }
-        process.crawl(GenericSpider, **spider_kwargs)
-        process.start(stop_after_crawl=True) # The reactor will stop after the crawl finishes
         
+        yield runner.crawl(GenericSpider, **spider_kwargs)
+        
+    except Exception as e:
+        logger.error(f"Error running Scrapy spider: {e}", exc_info=True)
+
+
+def _run_scrapy_spider_in_thread(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled):
+    """Helper to run Scrapy process in a separate thread using reactor."""
+    try:
+        # Check if reactor is already running
+        if reactor.running:
+            # If reactor is running, we need to use it differently
+            d = _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled)
+            return d
+        else:
+            # Start the reactor in this thread
+            def run_spider():
+                d = _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled)
+                d.addBoth(lambda _: reactor.stop())
+                return d
+            
+            reactor.callWhenRunning(run_spider)
+            reactor.run(installSignalHandlers=False)
+            
     except Exception as e:
         logger.error(f"Error running Scrapy spider in thread: {e}", exc_info=True)
 
 
 def _run_scrapy_spider(start_urls, scrape_mode="beautify", user_query="", proxy_enabled=False, captcha_solver_enabled=False):
     """
-    Synchronous wrapper to run the Scrapy spider in a separate thread and collect results.
+    Synchronous wrapper to run the Scrapy spider and collect results.
     Returns:
         list: A list of dictionaries, each representing a scraped item.
     """
-    crawl_thread = threading.Thread(
-        target=_run_scrapy_spider_in_thread, 
-        args=(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled)
-    )
-    crawl_thread.start()
-    crawl_thread.join() # Wait for the crawl to finish
-
-    results = []
-    while not _scrapy_results_queue.empty():
-        results.append(_scrapy_results_queue.get_nowait())
-    return results
+    try:
+        # Method 1: Try running without threading first (simpler approach)
+        if not reactor.running:
+            def run_and_stop():
+                d = _run_scrapy_spider_async(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled)
+                d.addBoth(lambda _: reactor.stop())
+                return d
+            
+            # Clear the queue before starting
+            while not _scrapy_results_queue.empty():
+                _scrapy_results_queue.get_nowait()
+                
+            reactor.callWhenRunning(run_and_stop)
+            reactor.run(installSignalHandlers=False)
+        else:
+            # If reactor is already running, we need a different approach
+            logger.warning("Reactor already running. Using alternative approach.")
+            # You might need to implement a different strategy here
+            # For now, return empty results with an error
+            return []
+        
+        # Collect results
+        results = []
+        while not _scrapy_results_queue.empty():
+            results.append(_scrapy_results_queue.get_nowait())
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in _run_scrapy_spider: {e}", exc_info=True)
+        return []
 
 
 def scrape_website(url, type="beautify", proxy_enabled=False, captcha_solver_enabled=False):
