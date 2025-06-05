@@ -11,12 +11,13 @@ from scrapy.linkextractors import LinkExtractor
 from scrapy.spiders import CrawlSpider, Rule
 from scrapy.item import Item, Field
 from scrapy import Request
-from twisted.internet import reactor, defer, threads # Import threads from twisted
-from twisted.internet.defer import inlineCallbacks, Deferred # Also import Deferred
+from twisted.internet import reactor, defer, threads
+from twisted.internet.defer import inlineCallbacks, Deferred
 
 logger = logging.getLogger(__name__)
 
 # This queue will hold results from Scrapy and be read by scraper.py
+# It remains global but won't be passed directly into Scrapy settings for pickling.
 _scrapy_results_queue = queue.Queue()
 
 # --- Global state for managing the reactor ---
@@ -26,15 +27,17 @@ _reactor_thread = None
 _reactor_deferred = None # To hold the deferred that completes when the reactor stops
 
 # --- Pipeline to put items into the queue ---
-# You need to make sure this pipeline is correctly defined in your project structure
-# For simplicity, I'm defining a barebones one here.
-# Assuming 'my_scraper_project/my_scraper_project/pipelines.py' exists and has JsonWriterPipeline
-# If not, create that file and define the pipeline there.
+# Define this pipeline here as it's used directly in this file
 class JsonWriterPipeline:
     def process_item(self, item, spider):
-        if spider.settings.get('SCRAPY_RESULTS_QUEUE'):
-            spider.settings['SCRAPY_RESULTS_QUEUE'].put(dict(item)) # Convert Item to dict
+        # Access the queue directly from the spider instance
+        if hasattr(spider, 'results_queue') and spider.results_queue:
+            spider.results_queue.put(dict(item)) # Convert Item to dict
+            spider.logger.info(f"Item processed and added to queue: {item.get('url', 'N/A')}")
+        else:
+            spider.logger.warning(f"Item processed but no queue found on spider to return results: {item.get('url', 'N/A')}")
         return item
+
 # -----------------------------------------------
 
 class ScrapedItem(Item):
@@ -61,6 +64,10 @@ class GenericSpider(CrawlSpider):
         self.domain = kwargs.get('domain', '')
         self.proxy_enabled = kwargs.get('proxy_enabled', False)
         self.captcha_solver_enabled = kwargs.get('captcha_solver_enabled', False)
+        
+        # The results queue will be passed directly to the spider instance
+        # It's important that this is not part of the 'settings' object itself.
+        self.results_queue = kwargs.get('results_queue', None)
 
         # Adjust allowed_domains dynamically based on start_urls
         if self.start_urls:
@@ -75,7 +82,6 @@ class GenericSpider(CrawlSpider):
         # but you can use them here for spider-specific overrides if necessary.
         # Ensure your custom_settings are merged/applied correctly.
         # The key is that `SCRAPY_RESULTS_QUEUE` is set in the `Settings` object passed to `CrawlerRunner`.
-
     def start_requests(self):
         for url in self.start_urls:
             yield Request(url, meta={'playwright': True}) # Request will be handled by Playwright
@@ -210,15 +216,13 @@ def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, ca
             'PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT': 30000,
             'PLAYWRIGHT_BROWSER_TYPE': 'chromium', # or 'firefox', 'webkit'
 
-            # Pipeline settings: Ensure this points to where your pipeline is defined
+            # Pipeline settings:
+            # We'll refer to the JsonWriterPipeline defined in THIS file ('scraper.py')
             'ITEM_PIPELINES': {
-                'scraper.JsonWriterPipeline': 300, # Assuming JsonWriterPipeline is in scraper.py
-                # If your pipeline is in 'my_scraper_project/my_scraper_project/pipelines.py':
-                # 'my_scraper_project.my_scraper_project.pipelines.JsonWriterPipeline': 300,
+                'scraper.JsonWriterPipeline': 300,
             },
 
-            # Custom settings
-            'SCRAPY_RESULTS_QUEUE': _scrapy_results_queue, # Pass the queue to pipeline
+            # 'SCRAPY_RESULTS_QUEUE': _scrapy_results_queue, # REMOVED: Do not pass unpicklable object in settings
             'FEEDS': {},
 
             # Headers for better compatibility
@@ -265,7 +269,8 @@ def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, ca
             'user_query': user_query,
             'domain': domain,
             'proxy_enabled': proxy_enabled,
-            'captcha_solver_enabled': captcha_solver_enabled
+            'captcha_solver_enabled': captcha_solver_enabled,
+            'results_queue': _scrapy_results_queue # Pass the queue directly to the spider
         }
 
         # Clear the queue before a new run
