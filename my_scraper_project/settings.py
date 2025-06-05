@@ -11,8 +11,10 @@
 
 BOT_NAME = 'my_scraper_project'
 
-SPIDER_MODULES = ['src.my_scraper_project.spiders']
-NEWSPIDER_MODULE = 'src.my_scraper_project.spiders'
+# Corrected SPIDER_MODULES and NEWSPIDER_MODULE to remove 'src.'
+# Assuming my_scraper_project is directly under your application root.
+SPIDER_MODULES = ['my_scraper_project.spiders']
+NEWSPIDER_MODULE = 'my_scraper_project.spiders'
 
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
@@ -71,8 +73,7 @@ EXTENSIONS = {
 ITEM_PIPELINES = {
     'scraper.JsonWriterPipeline': 300,
     # IMPORTANT: Double-check this path based on your project structure.
-    # If 'scraper.py' is inside 'src/my_scraper_project/', it should be:
-    # 'src.my_scraper_project.scraper.JsonWriterPipeline': 300,
+    # 'scraper.py' is at the root level, so 'scraper.JsonWriterPipeline' is correct.
 }
 
 # Enable and configure the AutoThrottle extension (disabled by default)
