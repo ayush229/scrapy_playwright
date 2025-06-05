@@ -1,3 +1,5 @@
+# scraper.py
+
 # Import install_reactor as the very first Twisted-related import
 from scrapy.utils.reactor import install_reactor
 
@@ -7,7 +9,8 @@ try:
     install_reactor("twisted.internet.asyncioreactor.AsyncioSelectorReactor")
 except Exception as e:
     # This might happen if another part of the application or environment
-    # has already installed a reactor. Log a warning but proceed.
+    # has already installed a reactor.
+    # Log a warning but proceed.
     # On Railway, it's possible some underlying system initializes Twisted.
     # However, this placement is the most robust for manual control.
     print(f"WARNING: Could not install AsyncioSelectorReactor at module load: {e}. "
@@ -108,7 +111,8 @@ class GenericSpider(Spider): # Changed from CrawlSpider
             live_with_text = None
             try:
                 # Assuming this is in a specific div or span near "LIVE with" text
-                live_with_locator = page.locator('div:has-text("LIVE with") span:has-text("Code")') # More specific locator
+                # Refined locator based on screenshot: div.top-left seems to contain it.
+                live_with_locator = page.locator('div.top-left')
                 await live_with_locator.wait_for(state='visible', timeout=5000)
                 live_with_text = await live_with_locator.inner_text()
             except Exception as e:
@@ -198,12 +202,13 @@ class GenericSpider(Spider): # Changed from CrawlSpider
                     self.logger.info(f"Clicking tab: {tab_name}")
                     await tab_button.click()
                     # Wait for the content to change after clicking the tab
-                    await page.wait_for_selector('div.your_content_container_class_after_tab_click', state='visible', timeout=10000) # IMPORTANT: Replace with actual content container class/selector
+                    # IMPORTANT: Replace with actual content container class/selector from generic_spider.py
+                    await page.wait_for_selector('div.tabs-content.second-content div.cli.tabopen.active', state='visible', timeout=10000)
                     await page.wait_for_load_state('networkidle') # Wait for new content to load
 
                     # Get the HTML of the new content section
                     # You'll need to identify the specific container that holds the content that changes when tabs are clicked
-                    content_container_selector = 'div.your_content_container_class_after_tab_click' # <<< REPLACE THIS SELECTOR
+                    content_container_selector = 'div.tabs-content.second-content div.cli.tabopen.active' # <<< REPLACED THIS SELECTOR
                     content_container_html = await page.locator(content_container_selector).inner_html()
                     
                     tab_soup = BeautifulSoup(content_container_html, 'html.parser')
