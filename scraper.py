@@ -61,7 +61,7 @@ class JsonWriterPipeline:
 
 class ScrapedItem(Item):
     url = Field()
-    content = Field()
+    content = Field() # This will now be a rich dictionary
     raw_data = Field()
     error = Field()
 
@@ -97,7 +97,10 @@ class GenericSpider(Spider): # Changed from CrawlSpider
         item['error'] = None
 
         if self.scrape_mode == 'raw':
-            item['raw_data'] = response.text
+            # Changed to await page.content() to ensure all dynamic content is included
+            page = response.playwright_page
+            item['raw_data'] = await page.content()
+            await page.close()
             yield item
             return
 
@@ -105,391 +108,220 @@ class GenericSpider(Spider): # Changed from CrawlSpider
             # Access the Playwright page object
             page = response.playwright_page
             
-            # Use Playwright to get visible text content, ensuring it's loaded
+            # Get the full rendered HTML content after Playwright has processed the page
+            rendered_html = await page.content()
+            soup = BeautifulSoup(rendered_html, 'html.parser')
             
-            # Try to get the "LIVE with Code GODARSHAN" section
-            live_with_text = None
-            try:
-                # Assuming this is in a specific div or span near "LIVE with" text
-                # Refined locator based on screenshot: div.top-left seems to contain it.
-                live_with_locator = page.locator('div.top-left')
-                await live_with_locator.wait_for(state='visible', timeout=5000)
-                live_with_text = await live_with_locator.inner_text()
-            except Exception as e:
-                self.logger.warning(f"Could not find 'LIVE with Code' element: {e}")
+            # --- Generalized content extraction ---
+            scraped_content = {}
 
-            # Try to get "Pick your next destination from these sacred sites"
-            next_destination_text = None
-            try:
-                next_destination_locator = page.locator('h2:has-text("Pick your NEXT DESTINATION from these sacred sites")')
-                await next_destination_locator.wait_for(state='visible', timeout=5000)
-                next_destination_text = await next_destination_locator.inner_text()
-            except Exception as e:
-                self.logger.warning(f"Could not find 'Pick your NEXT DESTINATION' element: {e}")
-
-
-            # Existing BeautifulSoup parsing for main content
-            soup = BeautifulSoup(response.text, 'html.parser')
-            content_sections = []
-
-            sections = soup.find_all(['section', 'div', 'article', 'main', 'body'])
-            if not sections and soup.body:
-                sections = [soup.body]
-            elif not sections:
-                sections = [soup]
-
-            for sec in sections:
-                section_data = {
-                    "heading": None,
-                    "paragraphs": [],
-                    "images": [],
-                    "links": []
-                }
-
-                heading_tags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
-                found_heading = None
-                for tag_name in heading_tags:
-                    heading = sec.find(tag_name)
-                    if heading and heading.get_text(strip=True):
-                        found_heading = { "tag": heading.name, "text": heading.get_text(strip=True) }
-                        break
-                section_data["heading"] = found_heading
-
-                paragraphs = sec.find_all(['p', 'li', 'span', 'div'])
-                for p in paragraphs:
-                    text = p.get_text(strip=True)
-                    if text and len(text) > 5:
-                        section_data["paragraphs"].append(text)
-
-                for img in sec.find_all("img"):
-                    src = img.get("src")
-                    if src:
-                        abs_url = urljoin(response.url, src)
-                        section_data["images"].append(abs_url)
-
-                for a in sec.find_all("a"):
-                    href = a.get("href")
-                    if href:
-                        abs_href = urljoin(response.url, href)
-                        section_data["links"].append(abs_href)
-
-                if section_data["heading"] or section_data["paragraphs"] or section_data["images"] or section_data["links"]:
-                    content_sections.append(section_data)
-
-            # Final fallback for general content
-            if not content_sections and soup.get_text(strip=True):
-                content_sections.append({
-                    "heading": None,
-                    "paragraphs": [soup.get_text(separator=' ', strip=True)],
-                    "images": [],
-                    "links": []
-                })
-            
-            # --- Handle Dynamic Tab Content ---
-            dynamic_sections_data = []
-            tab_selectors = {
-                "North": 'button:has-text("North")',
-                "South": 'button:has-text("South")',
-                "West": 'button:has-text("West")',
-                "East": 'button:has-text("East")',
-                "Central": 'button:has-text("Central")',
+            # 1. Page Metadata
+            scraped_content["metadata"] = {
+                "title": soup.title.get_text(strip=True) if soup.title else None,
+                "description": soup.find("meta", attrs={"name": "description"})["content"] if soup.find("meta", attrs={"name": "description"}) else None,
+                "keywords": soup.find("meta", attrs={"name": "keywords"})["content"] if soup.find("meta", attrs={"name": "keywords"}) else None,
+                "og_title": soup.find("meta", attrs={"property": "og:title"})["content"] if soup.find("meta", attrs={"property": "og:title"}) else None,
+                "og_description": soup.find("meta", attrs={"property": "og:description"})["content"] if soup.find("meta", attrs={"property": "og:description"}) else None,
+                "canonical_url": soup.find("link", attrs={"rel": "canonical"})["href"] if soup.find("link", attrs={"rel": "canonical"}) else None,
             }
 
-            for tab_name, selector in tab_selectors.items():
-                try:
-                    tab_button = page.locator(selector)
-                    await tab_button.wait_for(state='visible', timeout=5000)
-                    self.logger.info(f"Clicking tab: {tab_name}")
-                    await tab_button.click()
-                    # Wait for the content to change after clicking the tab
-                    # IMPORTANT: Replace with actual content container class/selector from generic_spider.py
-                    await page.wait_for_selector('div.tabs-content.second-content div.cli.tabopen.active', state='visible', timeout=10000)
-                    await page.wait_for_load_state('networkidle') # Wait for new content to load
+            # 2. Extract visible text blocks from the initial page load
+            # This captures general content without hardcoding specific phrases
+            general_text_content = []
+            for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'div']):
+                text = tag.get_text(strip=True)
+                if text and len(text) > 10: # Only capture substantial text blocks
+                    general_text_content.append(text)
+            scraped_content["general_page_text"] = general_text_content
 
-                    # Get the HTML of the new content section
-                    # You'll need to identify the specific container that holds the content that changes when tabs are clicked
-                    content_container_selector = 'div.tabs-content.second-content div.cli.tabopen.active' # <<< REPLACED THIS SELECTOR
-                    content_container_html = await page.locator(content_container_selector).inner_html()
+            # 3. Dynamic Tab Content Extraction (Generalized)
+            dynamic_sections_data = []
+
+            # Find potential tab-like buttons. Common patterns:
+            # - Buttons within a div with a "tabs" class
+            # - Buttons with a "role=tab" attribute
+            # - Links within a "nav" or "ul" that change content
+            
+            # Let's try to find elements that look like tab buttons.
+            # This is still somewhat heuristic, but more general than hardcoded text.
+            # Focus on buttons or anchors in common tab structures
+            potential_tab_locators = page.locator("div[class*='tabs'] button, div[class*='nav'] button, [role='tab']")
+            
+            num_potential_tabs = await potential_tab_locators.count()
+            self.logger.info(f"Found {num_potential_tabs} potential tab elements.")
+
+            for i in range(num_potential_tabs):
+                try:
+                    # Re-locate the button in each iteration to avoid stale element references
+                    current_tab_button = potential_tab_locators.nth(i)
+                    if not await current_tab_button.is_visible():
+                        self.logger.info(f"Skipping invisible tab button at index {i}.")
+                        continue
+
+                    tab_text = await current_tab_button.text_content()
+                    if not tab_text or len(tab_text.strip()) < 2:
+                        self.logger.info(f"Skipping tab button at index {i} with no meaningful text.")
+                        continue
+
+                    tab_name = tab_text.strip()
+                    self.logger.info(f"Attempting to click tab: '{tab_name}'")
+
+                    # Click the tab button
+                    await current_tab_button.click(timeout=10000)
+
+                    # Wait for network idle or a general indicator of content change.
+                    # This is crucial for dynamic content loaded after a click.
+                    await page.wait_for_load_state('networkidle', timeout=30000)
                     
-                    tab_soup = BeautifulSoup(content_container_html, 'html.parser')
-                    tab_paragraphs = [p.get_text(strip=True) for p in tab_soup.find_all(['p', 'li']) if p.get_text(strip=True)]
+                    # After clicking, get the updated content of the whole page
+                    updated_rendered_html = await page.content()
+                    updated_soup = BeautifulSoup(updated_rendered_html, 'html.parser')
+
+                    # Now, try to identify the main content area that likely changes.
+                    # This might involve looking for common content containers, or a general
+                    # scrape of the 'body' or 'main' tag after the click.
+                    # For maximum robustness, we'll re-scrape the whole visible content for the tab
                     
+                    tab_specific_content_soup = updated_soup # Assuming the relevant content is now in the main body
+
+                    tab_sections = self._extract_content_from_soup(tab_specific_content_soup)
+
                     dynamic_sections_data.append({
                         "tab_name": tab_name,
-                        "content": tab_paragraphs
+                        "content_sections": tab_sections
                     })
                 except Exception as e:
-                    self.logger.warning(f"Could not scrape content for tab '{tab_name}': {e}")
+                    self.logger.warning(f"Could not scrape content for dynamic tab (index {i}): {e}")
             
-            item['content'] = { 
-                "live_with_text": live_with_text,
-                "next_destination_prompt": next_destination_text,
-                "static_sections": content_sections,
-                "dynamic_sections": dynamic_sections_data # Add the dynamic content here
-            }
+            scraped_content["dynamic_tab_content"] = dynamic_sections_data
+
+            # 4. Main page content (structural)
+            # This is a broader, more generic scrape of the main page sections
+            main_page_sections = self._extract_content_from_soup(soup)
+            scraped_content["main_page_structured_content"] = main_page_sections
+
+
+            item['content'] = scraped_content
             yield item
 
         except Exception as e:
             self.logger.error(f"Error parsing HTML for {response.url}: {e}", exc_info=True)
             item['error'] = str(e)
             yield item
+        finally:
+            if 'playwright_page' in response.meta:
+                await response.meta["playwright_page"].close()
 
-# --- Async Scrapy Runner within Twisted's reactor ---
-@inlineCallbacks
-def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled):
-    """
-    Executes a single Scrapy crawl within the Twisted reactor.
-    This function should be called within the reactor's thread.
-    """
-    logger.info(f"Executing Scrapy crawl for {start_urls} in reactor thread.")
-    try:
-        settings = Settings()
+    def _extract_content_from_soup(self, soup_obj):
+        """Helper method to extract structured content from a BeautifulSoup object."""
+        extracted_blocks = []
 
-        base_settings = {
-            'BOT_NAME': 'travel_scraper',
-            'ROBOTSTXT_OBEY': False,
-            'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'DOWNLOAD_DELAY': 2,
-            'RANDOMIZE_DOWNLOAD_DELAY': True,
-            'CONCURRENT_REQUESTS': 8,
-            'CONCURRENT_REQUESTS_PER_DOMAIN': 4,
-            'AUTOTHROTTLE_ENABLED': True,
-            'AUTOTHROTTLE_START_DELAY': 1,
-            'AUTOTHROTTLE_MAX_DELAY': 10,
-            'AUTOTHROTTLE_TARGET_CONCURRENCY': 1.0,
-            'DOWNLOAD_TIMEOUT': 600, # Increased from 60 to 600 seconds (10 minutes)
-            'RETRY_TIMES': 2,
-            'LOG_LEVEL': 'INFO',
+        # Iterate over common semantic elements and generic divs that might contain content
+        for element in soup_obj.find_all(['header', 'nav', 'main', 'article', 'section', 'aside', 'footer', 'div', 'span', 'body']):
+            block_data = {
+                "tag": element.name,
+                "classes": element.get('class', []),
+                "id": element.get('id', None),
+                "attributes": {k: v for k, v in element.attrs.items() if k not in ['class', 'id']}, # Capture other attributes
+                "text_content": element.get_text(strip=True)[:500] if element.get_text(strip=True) else None, # Snippet of text
+                "headings": [],
+                "paragraphs": [],
+                "lists": [],
+                "tables": [],
+                "images": [],
+                "links": [],
+                "forms": []
+            }
+            
+            # Headings
+            for h in element.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                text = h.get_text(strip=True)
+                if text:
+                    block_data["headings"].append({"tag": h.name, "text": text})
 
-            'TELNETCONSOLE_ENABLED': False,
-            'STATS_CLASS': 'scrapy.statscollectors.MemoryStatsCollector',
+            # Paragraphs
+            for p in element.find_all('p'):
+                text = p.get_text(strip=True)
+                if text:
+                    block_data["paragraphs"].append(text)
 
-            'DOWNLOAD_HANDLERS': {
-                'http': 'scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler',
-                'https': 'scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler',
-            },
-            'TWISTED_REACTOR': 'twisted.internet.asyncioreactor.AsyncioSelectorReactor',
-            'PLAYWRIGHT_LAUNCH_OPTIONS': {
-                'headless': True, # CRUCIAL for server environments
-                'timeout': 30000, # Increased from 20000 ms to 30000 ms for launch
-                'args': [
-                    '--no-sandbox', # Required for Docker environments
-                    '--disable-dev-shm-usage', # Recommended for Docker
-                    '--disable-gpu',
-                    '--disable-web-security',
-                    '--disable-features=VizDisplayCompositor'
-                ]
-            },
-            # Increased Playwright timeouts for longer navigation and command execution
-            'PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT': 180000, # Increased to 3 minutes
-            'PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT': 180000,    # Increased to 3 minutes
-            'PLAYWRIGHT_BROWSER_TYPE': 'chromium', # or 'firefox', 'webkit'
+            # Lists
+            for list_tag in element.find_all(['ul', 'ol', 'dl']):
+                list_items = []
+                if list_tag.name in ['ul', 'ol']:
+                    for li in list_tag.find_all('li'):
+                        text = li.get_text(strip=True)
+                        if text:
+                            list_items.append(text)
+                elif list_tag.name == 'dl':
+                    for dt, dd in zip(list_tag.find_all('dt'), list_tag.find_all('dd')):
+                        dt_text = dt.get_text(strip=True)
+                        dd_text = dd.get_text(strip=True)
+                        if dt_text or dd_text:
+                            list_items.append({"term": dt_text, "description": dd_text})
+                if list_items:
+                    block_data["lists"].append({"type": list_tag.name, "items": list_items})
 
-            'ITEM_PIPELINES': {
-                'scraper.JsonWriterPipeline': 300,
-            },
+            # Tables
+            for table in element.find_all('table'):
+                table_data = []
+                headers = [th.get_text(strip=True) for th in table.find_all('th')]
+                rows = []
+                for tr in table.find_all('tr'):
+                    row_cells = [td.get_text(strip=True) for td in tr.find_all('td')]
+                    if row_cells:
+                        rows.append(row_cells)
+                block_data["tables"].append({"headers": headers, "rows": rows})
 
-            'FEEDS': {},
+            # Images
+            for img in element.find_all('img'):
+                src = img.get('src')
+                alt = img.get('alt')
+                if src:
+                    abs_src = urljoin(self.start_urls[0] if self.start_urls else '', src)
+                    block_data["images"].append({"src": abs_src, "alt": alt})
 
-            'DEFAULT_REQUEST_HEADERS': {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en',
-                'Accept-Encoding': 'gzip, deflate',
-            },
+            # Links
+            for a in element.find_all('a'):
+                href = a.get('href')
+                text = a.get_text(strip=True)
+                if href:
+                    abs_href = urljoin(self.start_urls[0] if self.start_urls else '', href)
+                    block_data["links"].append({"href": abs_href, "text": text})
 
-            'EXTENSIONS': {
-                'scrapy.extensions.corestats.CoreStats': 500,
-            },
-        }
-
-        domain = urlparse(start_urls[0]).netloc if start_urls else ''
-        if domain:
-            base_settings['ALLOWED_DOMAINS'] = [domain]
-
-        if scrape_mode == 'beautify':
-            base_settings['PLAYWRIGHT_PROCESS_REQUEST_HEADERS'] = None
-            base_settings['PLAYWRIGHT_PROCESS_RESPONSE_HEADERS'] = None
-
-        if proxy_enabled:
-            logger.info("Proxy enabled. Ensure 'PLAYWRIGHT_PROXY' is configured in Scrapy settings.")
-
-        settings.setdict(base_settings)
-        from scrapy.utils.log import configure_logging
-        configure_logging(settings)
-
-
-        runner = CrawlerRunner(settings)
-        spider_kwargs = {
-            'start_urls': start_urls,
-            'scrape_mode': scrape_mode,
-            'user_query': user_query,
-            'domain': domain,
-            'proxy_enabled': proxy_enabled,
-            'captcha_solver_enabled': captcha_solver_enabled,
-            'results_queue': _scrapy_results_queue
-        }
-
-        while not _scrapy_results_queue.empty():
-            _scrapy_results_queue.get_nowait()
-
-        yield runner.crawl(GenericSpider, **spider_kwargs)
-        logger.info(f"Scrapy crawl for {start_urls} finished successfully.")
-
-    except Exception as e:
-        logger.error(f"Error during Scrapy crawl execution: {e}", exc_info=True)
-        raise
-
-# --- Reactor Management Thread ---
-def _start_reactor_thread():
-    """Starts the Twisted reactor in a dedicated thread."""
-    global _reactor_thread, _reactor_deferred
-
-    with _reactor_lock:
-        if _reactor_thread is None or not _reactor_thread.is_alive():
-            _reactor_deferred = Deferred()
-            _reactor_thread = threading.Thread(target=_reactor_loop, daemon=True)
-            _reactor_thread.start()
-            logger.info("Twisted reactor started in a separate thread.")
-        else:
-            logger.info("Twisted reactor thread already running.")
-
-def _reactor_loop():
-    """The main loop for the Twisted reactor, to be run in a separate thread."""
-    global _reactor_deferred
-    try:
-        reactor.run(installSignalHandlers=False)
-    except Exception as e:
-        logger.error(f"Error in reactor thread: {e}", exc_info=True)
-    finally:
-        if _reactor_deferred:
-            if not _reactor_deferred.called:
-                _reactor_deferred.callback(None)
-
-# --- Public API for scraping ---
-def scrape_website(url, type="beautify", proxy_enabled=False, captcha_solver_enabled=False):
-    logger.info(f"Initiating scrape_website call for {url} (type: {type})")
-    _start_reactor_thread()
-
-    d = Deferred()
-    reactor.callFromThread(lambda: _execute_scrapy_crawl(
-        start_urls=[url],
-        scrape_mode=type,
-        user_query="",
-        proxy_enabled=proxy_enabled,
-        captcha_solver_enabled=captcha_solver_enabled
-    ).chainDeferred(d))
-
-    completion_event = threading.Event()
-    error_container = [None]
-
-    def _on_crawl_complete(result):
-        completion_event.set()
-        return result
-
-    def _on_crawl_error(failure):
-        error_container[0] = failure.getErrorMessage()
-        logger.error(f"Scrapy crawl failed: {failure.getErrorMessage()}", exc_info=True)
-        completion_event.set()
-        return failure
-
-    d.addCallback(_on_crawl_complete)
-    d.addErrback(_on_crawl_error)
-
-    try:
-        completion_event.wait(timeout=300)
-
-        if not completion_event.is_set():
-            logger.error(f"Scrapy crawl for {url} timed out after 300 seconds.")
-            return {"status": "error", "url": url, "type": type, "error": "Scraping operation timed out."}
-
-        if error_container[0]:
-            return {"status": "error", "url": url, "type": type, "error": error_container[0]}
-
-    except Exception as e:
-        logger.error(f"Unhandled error during scrape_website execution: {e}", exc_info=True)
-        return {"status": "error", "url": url, "type": type, "error": str(e)}
-
-    results = []
-    while not _scrapy_results_queue.empty():
-        try:
-            results.append(_scrapy_results_queue.get_nowait())
-        except queue.Empty:
-            break
-
-    if results:
-        first_item = results[0]
-        if first_item.get('error'):
-            return {"status": "error", "url": url, "type": type, "error": first_item['error']}
-        elif type == 'raw':
-            return {"status": "success", "url": url, "type": type, "data": first_item.get('raw_data')}
-        else: # beautify
-            return {"status": "success", "url": url, "type": type, "data": first_item.get('content')}
-    else:
-        return {"status": "error", "url": url, "type": type, "error": "No data scraped or unknown error. Check Scrapy logs for details."}
-
-
-def crawl_website(base_url, type="beautify", user_query="", proxy_enabled=False, captcha_solver_enabled=False):
-    logger.info(f"Initiating crawl_website call for {base_url} (type: {type})")
-    _start_reactor_thread()
-
-    d = Deferred()
-    reactor.callFromThread(lambda: _execute_scrapy_crawl(
-        start_urls=[base_url],
-        scrape_mode=type,
-        user_query=user_query,
-        proxy_enabled=proxy_enabled,
-        captcha_solver_enabled=captcha_solver_enabled
-    ).chainDeferred(d))
-
-    completion_event = threading.Event()
-    error_container = [None]
-
-    def _on_crawl_complete(result):
-        completion_event.set()
-        return result
-
-    def _on_crawl_error(failure):
-        error_container[0] = failure.getErrorMessage()
-        logger.error(f"Scrapy crawl failed: {failure.getErrorMessage()}", exc_info=True)
-        completion_event.set()
-        return failure
-
-    d.addCallback(_on_crawl_complete)
-    d.addErrback(_on_crawl_error)
-
-    try:
-        completion_event.wait(timeout=600)
-
-        if not completion_event.is_set():
-            logger.error(f"Scrapy crawl for {base_url} timed out after 600 seconds.")
-            return {"status": "error", "url": base_url, "type": type, "error": "Crawling operation timed out."}
-
-        if error_container[0]:
-            return {"status": "error", "url": base_url, "type": type, "error": error_container[0]}
-
-    except Exception as e:
-        logger.error(f"Unhandled error during crawl_website execution: {e}", exc_info=True)
-        return {"status": "error", "url": base_url, "type": type, "error": str(e)}
-
-    all_data = []
-    while not _scrapy_results_queue.empty():
-        try:
-            item = _scrapy_results_queue.get_nowait()
-            page_data = {"url": item.get('url')}
-            if item.get('error'):
-                page_data["error"] = item['error']
-            elif type == 'raw':
-                page_data["raw_data"] = item.get('raw_data')
-            else: # beautify
-                # Ensure the structure matches the new item['content']
-                page_data["content"] = {
-                    "live_with_text": item.get('content', {}).get('live_with_text'),
-                    "next_destination_prompt": item.get('content', {}).get('next_destination_prompt'),
-                    "static_sections": item.get('content', {}).get('static_sections', []),
-                    "dynamic_sections": item.get('content', {}).get('dynamic_sections', []),
+            # Forms
+            for form in element.find_all('form'):
+                form_data = {
+                    "action": form.get('action'),
+                    "method": form.get('method'),
+                    "inputs": []
                 }
-            all_data.append(page_data)
-        except queue.Empty:
-            break
+                for input_field in form.find_all(['input', 'textarea', 'select']):
+                    input_info = {
+                        "tag": input_field.name,
+                        "name": input_field.get('name'),
+                        "type": input_field.get('type') if input_field.name == 'input' else None,
+                        "value": input_field.get('value') if input_field.name == 'input' else input_field.get_text(strip=True),
+                        "placeholder": input_field.get('placeholder'),
+                        "label": input_field.find_previous_sibling('label').get_text(strip=True) if input_field.find_previous_sibling('label') else None
+                    }
+                    if input_field.name == 'select':
+                        input_info['options'] = [opt.get_text(strip=True) for opt in input_field.find_all('option')]
+                    form_data["inputs"].append(input_info)
+                block_data["forms"].append(form_data)
 
-    return all_data
+            # Only add block if it contains meaningful data
+            if any([block_data["headings"], block_data["paragraphs"], block_data["lists"], 
+                    block_data["tables"], block_data["images"], block_data["links"], 
+                    block_data["forms"]]) or (block_data["text_content"] and len(block_data["text_content"]) > 20):
+                extracted_blocks.append(block_data)
+        
+        return extracted_blocks
+
+
+    async def errback(self, failure):
+        self.logger.error(f"Error in Playwright request: {repr(failure)}")
+        request = failure.request
+        if 'playwright_page' in request.meta:
+            page = request.meta["playwright_page"]
+            await page.close()
