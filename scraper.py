@@ -181,65 +181,53 @@ class GenericSpider(Spider): # Changed from CrawlSpider
                     "links": []
                 })
             
-            # --- Handle Dynamic Tab Content ---=
-dynamic_sections_data = []
-tab_buttons = await page.locator("div.tabs_main button")
-tab_count = await tab_buttons.count()
-
-for i in range(tab_count):
-    try:
-        tab_button = tab_buttons.nth(i)
-        tab_name = await tab_button.text_content()
-        await tab_button.click()
-        
-        # Wait for the visible section under that tab to load (like a 'food-box' content or temple block)
-        await page.wait_for_selector("div.tabs-content.second-content div.cli.tabopen.active", state="visible", timeout=15000)
-
-        content_html = await page.locator("div.tabs-content.second-content div.cli.tabopen.active").inner_html()
-        tab_soup = BeautifulSoup(content_html, "html.parser")
-        
-        content_sections = []
-        for block in tab_soup.find_all("div", class_="food-box"):
-            section_data = {
-                "heading": None,
-                "paragraphs": [],
-                "images": [],
-                "links": [],
-                "list_items": []
+            # --- Handle Dynamic Tab Content ---
+            dynamic_sections_data = []
+            tab_selectors = {
+                "North": 'button:has-text("North")',
+                "South": 'button:has-text("South")',
+                "West": 'button:has-text("West")',
+                "East": 'button:has-text("East")',
+                "Central": 'button:has-text("Central")',
             }
 
-            heading = block.find("h2")
-            if heading:
-                section_data["heading"] = {"tag": heading.name, "text": heading.get_text(strip=True)}
+            for tab_name, selector in tab_selectors.items():
+                try:
+                    tab_button = page.locator(selector)
+                    await tab_button.wait_for(state='visible', timeout=5000)
+                    self.logger.info(f"Clicking tab: {tab_name}")
+                    await tab_button.click()
+                    # Wait for the content to change after clicking the tab
+                    await page.wait_for_selector('div.your_content_container_class_after_tab_click', state='visible', timeout=10000) # IMPORTANT: Replace with actual content container class/selector
+                    await page.wait_for_load_state('networkidle') # Wait for new content to load
 
-            food_text = block.select_one("div.food-text p")
-            if food_text:
-                section_data["paragraphs"].append(food_text.get_text(strip=True))
+                    # Get the HTML of the new content section
+                    # You'll need to identify the specific container that holds the content that changes when tabs are clicked
+                    content_container_selector = 'div.your_content_container_class_after_tab_click' # <<< REPLACE THIS SELECTOR
+                    content_container_html = await page.locator(content_container_selector).inner_html()
+                    
+                    tab_soup = BeautifulSoup(content_container_html, 'html.parser')
+                    tab_paragraphs = [p.get_text(strip=True) for p in tab_soup.find_all(['p', 'li']) if p.get_text(strip=True)]
+                    
+                    dynamic_sections_data.append({
+                        "tab_name": tab_name,
+                        "content": tab_paragraphs
+                    })
+                except Exception as e:
+                    self.logger.warning(f"Could not scrape content for tab '{tab_name}': {e}")
+            
+            item['content'] = { 
+                "live_with_text": live_with_text,
+                "next_destination_prompt": next_destination_text,
+                "static_sections": content_sections,
+                "dynamic_sections": dynamic_sections_data # Add the dynamic content here
+            }
+            yield item
 
-            for li in block.find_all("li"):
-                text = li.get_text(strip=True)
-                if text:
-                    section_data["list_items"].append(text)
-
-            for img in block.find_all("img"):
-                src = img.get("src")
-                if src:
-                    section_data["images"].append(urljoin(response.url, src))
-
-            for a in block.find_all("a"):
-                href = a.get("href")
-                if href:
-                    section_data["links"].append(urljoin(response.url, href))
-
-            content_sections.append(section_data)
-
-        dynamic_sections_data.append({
-            "tab_name": tab_name.strip(),
-            "content": content_sections
-        })
-    except Exception as e:
-        self.logger.warning(f"Failed to scrape tab {i}: {e}")
-
+        except Exception as e:
+            self.logger.error(f"Error parsing HTML for {response.url}: {e}", exc_info=True)
+            item['error'] = str(e)
+            yield item
 
 # --- Async Scrapy Runner within Twisted's reactor ---
 @inlineCallbacks
