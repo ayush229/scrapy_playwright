@@ -23,7 +23,8 @@ import threading
 from scrapy.crawler import CrawlerRunner
 from scrapy.settings import Settings
 from scrapy.linkextractors import LinkExtractor
-from scrapy.spiders import CrawlSpider, Rule
+# CHANGE: Import scrapy.Spider instead of CrawlSpider
+from scrapy import Spider # Changed from CrawlSpider
 from scrapy.item import Item, Field
 from scrapy import Request
 from twisted.internet import reactor, defer, threads
@@ -62,16 +63,17 @@ class ScrapedItem(Item):
     raw_data = Field()
     error = Field()
 
-class GenericSpider(CrawlSpider):
+# CHANGE: Inherit from scrapy.Spider
+class GenericSpider(Spider): # Changed from CrawlSpider
     name = 'generic_spider'
     # custom_settings will be overridden by the Settings object passed to CrawlerRunner
     # but it's good practice to keep common settings here for readability if needed
     # (though in our setup, settings are built dynamically in _run_scrapy_spider_async)
 
-    rules = (
-        # LinkExtractor will be updated dynamically in __init__
-        Rule(LinkExtractor(deny_domains=['google.com', 'facebook.com', 'twitter.com']), callback='parse_item', follow=True),
-    )
+    # REMOVED: rules are not needed for scrapy.Spider that only scrapes start_urls
+    # rules = (
+    #     Rule(LinkExtractor(deny_domains=['google.com', 'facebook.com', 'twitter.com']), callback='parse_item', follow=True),
+    # )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -89,10 +91,12 @@ class GenericSpider(CrawlSpider):
         if self.start_urls:
             parsed_start_url = urlparse(self.start_urls[0])
             self.domain = parsed_start_url.netloc
+            # allowed_domains is still useful for filtering in middleware, though with no rules, it's less critical.
             self.allowed_domains = [self.domain] if self.domain else []
-            self.rules = (
-                Rule(LinkExtractor(allow_domains=self.allowed_domains, deny_domains=['google.com', 'facebook.com', 'twitter.com', 'linkedin.com']), callback='parse_item', follow=True),
-            )
+            # REMOVED: No need to update rules as there are no rules.
+            # self.rules = (
+            #     Rule(LinkExtractor(allow_domains=self.allowed_domains, deny_domains=['google.com', 'facebook.com', 'twitter.com', 'linkedin.com']), callback='parse_item', follow=True),
+            # )
 
         # These settings are now largely handled by the settings object passed to CrawlerRunner
         # but you can use them here for spider-specific overrides if necessary.
@@ -100,7 +104,7 @@ class GenericSpider(CrawlSpider):
         # The key is that `SCRAPY_RESULTS_QUEUE` is set in the `Settings` object passed to `CrawlerRunner'.
     def start_requests(self):
         for url in self.start_urls:
-            yield Request(url, meta={'playwright': True}) # Request will be handled by Playwright
+            yield Request(url, meta={'playwright': True}, callback=self.parse_item) # Ensure callback is parse_item
 
     def parse_item(self, response):
         item = ScrapedItem()
@@ -232,7 +236,7 @@ def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, ca
             },
             # Increased Playwright timeouts for longer navigation and command execution
             'PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT': 120000, # Increased from 30000 to 120000 (2 minutes)
-            'PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT': 120000,   # Increased from 30000 to 120000 (2 minutes)
+            'PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT': 120000,    # Increased from 30000 to 120000 (2 minutes)
             'PLAYWRIGHT_BROWSER_TYPE': 'chromium', # or 'firefox', 'webkit'
 
             # Pipeline settings:
@@ -256,6 +260,10 @@ def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, ca
             },
         }
 
+        # IMPORTANT: ALLOWED_DOMAINS is not strictly needed if not following links,
+        # but it's good practice for general Scrapy settings.
+        # However, for the current requirement (only start_urls), it won't prevent
+        # following links unless coupled with LinkExtractor rules.
         domain = urlparse(start_urls[0]).netloc if start_urls else ''
         if domain:
             base_settings['ALLOWED_DOMAINS'] = [domain]
