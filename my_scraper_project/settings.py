@@ -14,113 +14,121 @@ NEWSPIDER_MODULE = 'src.my_scraper_project.spiders'
 
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' # Recommended for Playwright
+# Recommended User-Agent for Playwright-based scraping to mimic a real browser
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-# Obey robots.txt rules - Set to False if you need to ignore it for specific sites
-ROBOTSTXT_OBEY = False # Often set to False when using Playwright for aggressive scraping
+# Obey robots.txt rules
+# Set to False often for dynamic scraping to ensure all content is accessible,
+# but use with caution and respect website policies.
+ROBOTSTXT_OBEY = False
 
 # Configure maximum concurrent requests performed by Scrapy (default: 16)
-CONCURRENT_REQUESTS = 8 # Lower for Playwright as it's resource-intensive
+# Lower for Playwright as it's more resource-intensive (each request launches a browser).
+CONCURRENT_REQUESTS = 8
 
 # Configure a delay for requests for the same website (default: 0)
 # See https://docs.scrapy.org/en/latest/topics/settings.html#download-delay
 # See also autothrottle settings and docs
-DOWNLOAD_DELAY = 2 # Add a delay to be polite and avoid blocks
+DOWNLOAD_DELAY = 2 # A polite delay to avoid overwhelming the server
 # The download delay setting will honor only one of:
-CONCURRENT_REQUESTS_PER_DOMAIN = 4 # Lower for Playwright
-#CONCURRENT_REQUESTS_PER_IP = 16 # Keep commented unless you're rotating IPs heavily
+CONCURRENT_REQUESTS_PER_DOMAIN = 4 # Lower concurrency per domain for Playwright
+#CONCURRENT_REQUESTS_PER_IP = 16
 
 # Disable cookies (enabled by default)
-# COOKIES_ENABLED = False # Keep enabled for Playwright to manage sessions by default
+# Keep cookies enabled for Playwright to manage sessions by default, as a real browser would.
+#COOKIES_ENABLED = False
 
 # Disable Telnet Console (enabled by default)
-TELNETCONSOLE_ENABLED = False # Disable for server environments
+TELNETCONSOLE_ENABLED = False
 
 # Override the default request headers:
 DEFAULT_REQUEST_HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en',
-    'Accept-Encoding': 'gzip, deflate', # Add encoding
+    'Accept-Encoding': 'gzip, deflate', # Standard encoding for browser requests
 }
 
 # Enable or disable spider middlewares
-# See https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 #SPIDER_MIDDLEWARES = {
 #    'src.my_scraper_project.middlewares.MyScraperProjectSpiderMiddleware': 543,
 #}
 
 # Enable or disable downloader middlewares
-# See https://docs.scrapy.org/en/latest/topics/downloader-middleware.html
-DOWNLOADER_MIDDLEWARES = {
+#DOWNLOADER_MIDDLEWARES = {
 #    'src.my_scraper_project.middlewares.MyScraperProjectDownloaderMiddleware': 543,
-}
+#}
 
 # Enable or disable extensions
-# See https://docs.scrapy.org/en/latest/topics/extensions.html
 EXTENSIONS = {
-    'scrapy.extensions.corestats.CoreStats': 500, # Only enable core stats for simplicity
+    'scrapy.extensions.corestats.CoreStats': 500, # Provides basic scraping stats
     'scrapy.extensions.telnet.TelnetConsole': None, # Ensure TelnetConsole is disabled
 }
 
 # Configure item pipelines
-# See https://docs.scrapy.org/en/latest/topics/item-pipeline.html
+# CRITICAL: This enables your JsonWriterPipeline to process scraped items.
 ITEM_PIPELINES = {
-    'scraper.JsonWriterPipeline': 300, # IMPORTANT: Correctly reference your pipeline from 'scraper.py'
-                                        # Assuming 'scraper.py' is at the project root or in the same path where Scrapy can find it.
-                                        # If 'scraper.py' is in a subfolder like 'src/my_scraper_project',
-                                        # you might need 'src.my_scraper_project.scraper.JsonWriterPipeline'
+    'scraper.JsonWriterPipeline': 300,
+    # IMPORTANT: Double-check this path based on your project structure.
+    # If 'scraper.py' is inside 'src/my_scraper_project/', it should be:
+    # 'src.my_scraper_project.scraper.JsonWriterPipeline': 300,
 }
 
 # Enable and configure the AutoThrottle extension (disabled by default)
-# See https://docs.scrapy.org/en/latest/topics/autothrottle.html
 AUTOTHROTTLE_ENABLED = True
 # The initial download delay
-AUTOTHROTTLE_START_DELAY = 1 # Start with a shorter delay
+AUTOTHROTTLE_START_DELAY = 1
 # The maximum download delay to be set in case of high latencies
-AUTOTHROTTLE_MAX_DELAY = 10 # Adjust as needed
+AUTOTHROTTLE_MAX_DELAY = 10
 # The average number of requests Scrapy should be sending in parallel to
 # each remote server
 AUTOTHROTTLE_TARGET_CONCURRENCY = 1.0
 # Enable showing throttling stats for every response received:
-AUTOTHROTTLE_DEBUG = False # Set to True for debugging throttling
+AUTOTHROTTLE_DEBUG = False
 
 # Enable and configure HTTP caching (disabled by default)
-# See https://docs.scrapy.org/en/latest/topics/downloader-middleware.html#httpcache-middleware-settings
-# HTTPCACHE_ENABLED = True # Keep commented out unless you specifically need caching for development/testing
-# HTTPCACHE_EXPIRATION_SECS = 0
-# HTTPCACHE_DIR = 'httpcache'
-# HTTPCACHE_IGNORE_HTTP_CODES = []
-# HTTPCACHE_STORAGE = 'scrapy.extensions.httpcache.FilesystemCacheStorage'
+# Keep commented out unless you specifically need caching for development/testing
+#HTTPCACHE_ENABLED = True
+#HTTPCACHE_EXPIRATION_SECS = 0
+#HTTPCACHE_DIR = 'httpcache'
+#HTTPCACHE_IGNORE_HTTP_CODES = []
+#HTTPCACHE_STORAGE = 'scrapy.extensions.httpcache.FilesystemCacheStorage'
 
-# Set settings for Playwright if you are using it (example)
-# UNCOMMENT AND CONFIGURE THESE FOR PLAYWRIGHT
+# =============================================================================
+# Playwright Specific Settings
+# CRITICAL: These settings enable Scrapy to use Playwright for rendering pages.
+# =============================================================================
+
+# Tell Scrapy to use the Playwright download handler for HTTP/HTTPS requests
 DOWNLOAD_HANDLERS = {
     "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
     "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
 }
-TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor" # Essential for Playwright
 
-PLAYWRIGHT_BROWSER_TYPE = "chromium"  # or "firefox", "webkit"
+# Essential: Use the asyncio reactor for Twisted, required by scrapy-playwright
+TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
+
+# Configure the browser type Playwright should use
+PLAYWRIGHT_BROWSER_TYPE = "chromium"  # Options: "chromium", "firefox", "webkit"
+
+# Configure launch options for the Playwright browser
 PLAYWRIGHT_LAUNCH_OPTIONS = {
-    "headless": True, # CRUCIAL for server environments and often for performance
-    "timeout": 20000, # Playwright launch timeout (milliseconds)
+    "headless": True, # Set to False for debugging (browser UI will show)
+    "timeout": 20000, # Launch timeout in milliseconds (20 seconds)
     "args": [
-        '--no-sandbox', # Required for Docker environments like Railway
-        '--disable-dev-shm-usage', # Recommended for Docker
-        '--disable-gpu', # Disable GPU hardware acceleration
-        '--disable-web-security', # Sometimes needed for cross-origin issues
-        '--disable-features=VizDisplayCompositor' # Can help in headless environments
+        '--no-sandbox',             # Required for Docker environments (e.g., Railway)
+        '--disable-dev-shm-usage',  # Recommended for Docker to prevent /dev/shm issues
+        '--disable-gpu',            # Disable GPU hardware acceleration
+        '--disable-web-security',   # Sometimes needed for cross-origin issues
+        '--disable-features=VizDisplayCompositor' # Can help stability in headless environments
     ]
 }
 
-# Increased Playwright timeouts for longer navigation and command execution
-PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 120000 # 2 minutes
-PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT = 120000    # 2 minutes
+# Increase default Playwright timeouts for page navigation and command execution.
+# Dynamic pages with many elements or slow loading times benefit from longer timeouts.
+PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 120000 # 2 minutes (for page load events)
+PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT = 120000    # 2 minutes (for individual Playwright actions like click, wait_for_selector)
 
-# Add any custom unpicklable objects here by ensuring they are not initialized
-# directly, but rather configured to be initialized on demand within spiders/middlewares/pipelines.
-# For example, if you had a logging object that caused the TypeError, ensure it's removed from here
-# and initialized locally where it's needed (e.g., in a spider's __init__ method).
-
-# Log Level (useful for debugging)
-LOG_LEVEL = 'INFO'
+# =============================================================================
+# Logging
+# =============================================================================
+LOG_LEVEL = 'INFO' # Set to 'DEBUG' for more verbose output during development
