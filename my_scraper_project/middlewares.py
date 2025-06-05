@@ -62,8 +62,8 @@ class CaptchaSolverMiddleware:
         #     # if solved_response:
         #     #    return solved_response # Return a new response after solving
         #     # else:
-        #     #    spider.logger.error(f"Failed to solve CAPTCHA on {response.url}.")
-        #     #    return request.replace(dont_filter=True) # Retry or mark as error
+            #    spider.logger.error(f"Failed to solve CAPTCHA on {response.url}.")
+            #    return request.replace(dont_filter=True) # Retry or mark as error
         #
         # For this copy-paste, it will just log a warning.
         if response.status == 403 and "cloudflare" in response.headers.get('Server', '').lower():
