@@ -203,7 +203,8 @@ def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, ca
             'AUTOTHROTTLE_START_DELAY': 1,
             'AUTOTHROTTLE_MAX_DELAY': 10,
             'AUTOTHROTTLE_TARGET_CONCURRENCY': 1.0,
-            'DOWNLOAD_TIMEOUT': 60,
+            # Increased DOWNLOAD_TIMEOUT for longer operations
+            'DOWNLOAD_TIMEOUT': 600, # Increased from 60 to 600 seconds (10 minutes)
             'RETRY_TIMES': 2,
             'LOG_LEVEL': 'INFO',
 
@@ -220,7 +221,7 @@ def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, ca
             'TWISTED_REACTOR': 'twisted.internet.asyncioreactor.AsyncioSelectorReactor',
             'PLAYWRIGHT_LAUNCH_OPTIONS': {
                 'headless': True, # CRUCIAL for server environments
-                'timeout': 20000,
+                'timeout': 20000, # Playwright launch timeout (milliseconds)
                 'args': [
                     '--no-sandbox', # Required for Docker environments
                     '--disable-dev-shm-usage', # Recommended for Docker
@@ -229,8 +230,9 @@ def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, ca
                     '--disable-features=VizDisplayCompositor'
                 ]
             },
-            'PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT': 30000,
-            'PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT': 30000,
+            # Increased Playwright timeouts for longer navigation and command execution
+            'PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT': 120000, # Increased from 30000 to 120000 (2 minutes)
+            'PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT': 120000,   # Increased from 30000 to 120000 (2 minutes)
             'PLAYWRIGHT_BROWSER_TYPE': 'chromium', # or 'firefox', 'webkit'
 
             # Pipeline settings:
@@ -384,11 +386,11 @@ def scrape_website(url, type="beautify", proxy_enabled=False, captcha_solver_ena
     d.addErrback(_on_crawl_error)
 
     try:
-        # Wait for the crawl to complete
-        completion_event.wait(timeout=120) # Max 120 seconds to wait for scrape
+        # Increased timeout for scrape_website (e.g., 5 minutes)
+        completion_event.wait(timeout=300) # Increased from 120 to 300 seconds (5 minutes)
 
         if not completion_event.is_set():
-            logger.error(f"Scrapy crawl for {url} timed out after 120 seconds.")
+            logger.error(f"Scrapy crawl for {url} timed out after 300 seconds.")
             return {"status": "error", "url": url, "type": type, "error": "Scraping operation timed out."}
 
         if error_container[0]:
@@ -452,10 +454,11 @@ def crawl_website(base_url, type="beautify", user_query="", proxy_enabled=False,
     d.addErrback(_on_crawl_error)
 
     try:
-        completion_event.wait(timeout=300) # Max 300 seconds for a crawl
+        # Increased timeout for crawl_website (e.g., 10 minutes)
+        completion_event.wait(timeout=600) # Increased from 300 to 600 seconds (10 minutes)
 
         if not completion_event.is_set():
-            logger.error(f"Scrapy crawl for {base_url} timed out after 300 seconds.")
+            logger.error(f"Scrapy crawl for {base_url} timed out after 600 seconds.")
             return {"status": "error", "url": base_url, "type": type, "error": "Crawling operation timed out."}
 
         if error_container[0]:
