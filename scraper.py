@@ -136,7 +136,8 @@ def _stop_reactor_thread():
 
 # --- Public API for scraping ---
 
-def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = '', proxy_enabled: bool = False, captcha_solver_enabled: bool = False) -> dict:
+# Changed proxy_enabled to proxy_url: str = None
+def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = '', proxy_url: str = None, captcha_solver_enabled: bool = False) -> dict:
     """
     Initiates a Scrapy crawl for a single URL and returns the results as a dictionary
     with status and data.
@@ -176,7 +177,7 @@ def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = ''
         start_urls=[url],
         scrape_mode=scrape_mode,
         user_query=user_query,
-        proxy_enabled=proxy_enabled,
+        proxy_url=proxy_url, # Pass the proxy_url string
         captcha_solver_enabled=captcha_solver_enabled,
         results_queue=_scrapy_results_queue
     )
@@ -229,7 +230,8 @@ def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = ''
     return {"status": "success", "data": final_results}
 
 
-def crawl_website(start_url: str, depth: int = 1, scrape_mode: str = 'beautify', user_query: str = '', proxy_enabled: bool = False, captcha_solver_enabled: bool = False) -> dict:
+# Changed proxy_enabled to proxy_url: str = None
+def crawl_website(start_url: str, depth: int = 1, scrape_mode: str = 'beautify', user_query: str = '', proxy_url: str = None, captcha_solver_enabled: bool = False) -> dict:
     """
     Initiates a broader Scrapy crawl, following links up to a specified depth.
     NOTE: The current `GenericSpider` is a basic Spider and does not implement link following for depth.
@@ -239,4 +241,4 @@ def crawl_website(start_url: str, depth: int = 1, scrape_mode: str = 'beautify',
     logger.warning("The current `GenericSpider` is a basic Spider and does not implement link following for depth. "
                    "It will only scrape the `start_url` provided. To enable depth crawling, "
                    "`GenericSpider` needs to be enhanced with `LinkExtractor` and rules, or converted to a `CrawlSpider`.")
-    return scrape_website(start_url, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled)
+    return scrape_website(start_url, scrape_mode, user_query, proxy_url, captcha_solver_enabled)
