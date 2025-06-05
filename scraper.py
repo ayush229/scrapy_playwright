@@ -95,42 +95,17 @@ def _run_reactor_blocking(d):
             d.callback(None)
         logger.info("Twisted reactor thread stopped.")
 
-@inlineCallbacks
-def _run_scrapy_spider_async(start_urls, scrape_mode='beautify', user_query='', proxy_enabled=False, captcha_solver_enabled=False):
+def _run_scrapy_spider_submit_crawl(runner, spider_cls, start_urls, **kwargs):
     """
-    Asynchronously runs the Scrapy spider and collects results.
-    This function must be called from within the Twisted reactor's thread.
+    Submits the crawl to the runner. To be called within the reactor thread.
+    Returns the Deferred that fires when the crawl completes.
     """
-    settings = Settings()
-    # Assuming 'my_scraper_project' is the root of your Scrapy project
-    # and settings.py is directly inside it.
-    settings_module = 'my_scraper_project.settings' 
-    settings.setmodule(settings_module, priority='project')
-
-    # Pass the queue to the spider via custom_settings, then retrieve it in the pipeline
-    # NOTE: The queue itself cannot be pickled, so we pass it during spider init.
-    # The pipeline will then access it from the spider instance.
-    settings.set('ITEM_PIPELINES', {
-        'scraper.JsonWriterPipeline': 300, # Reference the pipeline directly from scraper.py
-    }, priority='cmdline') # Use high priority to ensure it overrides project settings
-
-    runner = CrawlerRunner(settings)
-    
-    # Pass results_queue directly during spider instantiation
-    deferred = runner.crawl(
-        GenericSpider,
+    logger.info("Submitting crawl to Scrapy CrawlerRunner.")
+    return runner.crawl(
+        spider_cls,
         start_urls=start_urls,
-        scrape_mode=scrape_mode,
-        user_query=user_query,
-        proxy_enabled=proxy_enabled,
-        captcha_solver_enabled=captcha_solver_enabled,
-        results_queue=_scrapy_results_queue # Pass the queue here
+        **kwargs
     )
-    
-    yield deferred # Wait for the crawl to finish
-
-    # Signal that the crawl is complete
-    logger.info("Scrapy crawl finished for current request.")
 
 def _stop_reactor_thread():
     """Stops the Twisted reactor if it's running."""
@@ -143,9 +118,6 @@ def _stop_reactor_thread():
             
             # Wait for the deferred to fire, indicating reactor has truly stopped
             if _reactor_deferred and not _reactor_deferred.called:
-                # Use threads.blockingCallFromThread if you need to block the
-                # current thread until the reactor stops.
-                # For most cases, just letting the deferred be called is enough.
                 logger.info("Waiting for reactor shutdown deferred.")
                 _reactor_deferred.addErrback(lambda fail: logger.error(f"Reactor shutdown error: {fail.value}"))
                 return defer.DeferredList([_reactor_deferred])
@@ -154,15 +126,15 @@ def _stop_reactor_thread():
                 return defer.succeed(None)
         else:
             logger.info("Twisted reactor is not running.")
-            return defer.succeed(None) # Return an immediately successful deferred
+            return defer.succeed(None)
 
 
 # --- Public API for scraping ---
 
-def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = '', proxy_enabled: bool = False, captcha_solver_enabled: bool = False) -> list:
+def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = '', proxy_enabled: bool = False, captcha_solver_enabled: bool = False) -> dict:
     """
-    Initiates a Scrapy crawl for a single URL and returns the results.
-    The scrape_mode can be 'beautify' (default) for parsed content or 'raw' for raw HTML.
+    Initiates a Scrapy crawl for a single URL and returns the results as a dictionary
+    with status and data.
     """
     _start_reactor_thread() # Ensure reactor is running
 
@@ -174,18 +146,32 @@ def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = ''
         except queue.Empty:
             pass
 
-    # Call the spider run in the reactor's thread
-    d = threads.deferToThread(
-        _run_scrapy_spider_async,
+    settings = Settings()
+    settings_module = 'my_scraper_project.settings' 
+    settings.setmodule(settings_module, priority='project')
+
+    settings.set('ITEM_PIPELINES', {
+        'scraper.JsonWriterPipeline': 300,
+    }, priority='cmdline')
+
+    runner = CrawlerRunner(settings)
+    
+    # Schedule the actual crawl submission on the reactor thread
+    # The Deferred 'd' here will fire when the crawl started by runner.crawl completes.
+    d = reactor.callFromThread(
+        _run_scrapy_spider_submit_crawl,
+        runner,
+        GenericSpider,
         start_urls=[url],
         scrape_mode=scrape_mode,
         user_query=user_query,
         proxy_enabled=proxy_enabled,
-        captcha_solver_enabled=captcha_solver_enabled
+        captcha_solver_enabled=captcha_solver_enabled,
+        results_queue=_scrapy_results_queue
     )
 
     # This callback will run in the main thread once the crawl (and its deferred) completes
-    def collect_results(result):
+    def collect_results(_): # _ is the result of the deferred from runner.crawl (usually None)
         logger.info("Scrapy crawl deferred completed. Collecting results.")
         while not _scrapy_results_queue.empty():
             results.append(_scrapy_results_queue.get())
@@ -197,15 +183,9 @@ def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = ''
         # Collect any partial results if available
         while not _scrapy_results_queue.empty():
             results.append(_scrapy_results_queue.get())
-        return results # Return partial results even on error
+        return failure # Return the failure object so it propagates
 
     d.addCallbacks(collect_results, err_collect_results)
-    
-    # We need to block the current thread until the deferred completes,
-    # because the scraper function is synchronous from the caller's perspective.
-    # This must be done carefully to avoid blocking the reactor thread itself.
-    # The deferToThread ensures _run_scrapy_spider_async runs on reactor thread,
-    # and the result collection happens when d fires.
     
     # Use a threading.Event to signal completion in the main thread
     completion_event = threading.Event()
@@ -229,23 +209,21 @@ def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = ''
 
     if not completion_event.is_set():
         logger.warning("Scrapy crawl did not complete within the allotted time. Partial results might be returned.")
+        return {"status": "timeout", "data": final_results, "message": "Scrapy crawl timed out."}
 
     if final_error:
         logger.error(f"Scrapy crawl completed with error: {final_error.value}")
-        # Optionally, re-raise the error or include it in results
-        # For now, we'll return collected results.
-        return final_results
-    return final_results
+        return {"status": "error", "data": final_results, "message": str(final_error.value)}
+    
+    return {"status": "success", "data": final_results}
 
 
-def crawl_website(start_url: str, depth: int = 1, scrape_mode: str = 'beautify', user_query: str = '', proxy_enabled: bool = False, captcha_solver_enabled: bool = False) -> list:
+def crawl_website(start_url: str, depth: int = 1, scrape_mode: str = 'beautify', user_query: str = '', proxy_enabled: bool = False, captcha_solver_enabled: bool = False) -> dict:
     """
     Initiates a broader Scrapy crawl, following links up to a specified depth.
-    NOTE: Link extraction logic needs to be integrated into GenericSpider's `parse` method
-    if you want to use a CrawlSpider-like behavior with depth.
-    For this current GenericSpider (which is a basic Spider), it only scrapes the start_url.
-    If you need actual depth-based crawling, GenericSpider would need to implement
-    rules similar to Scrapy's CrawlSpider, or you'd switch to CrawlSpider itself.
+    NOTE: The current `GenericSpider` is a basic Spider and does not implement link following for depth.
+    It will only scrape the `start_url` provided. To enable depth crawling,
+    `GenericSpider` needs to be enhanced with `LinkExtractor` and rules, or converted to a `CrawlSpider`.
     """
     logger.warning("The current `GenericSpider` is a basic Spider and does not implement link following for depth. "
                    "It will only scrape the `start_url` provided. To enable depth crawling, "
