@@ -1,3 +1,5 @@
+# settings.py
+
 # Scrapy settings for my_scraper_project project
 #
 # For simplicity, this file contains only settings considered important or
@@ -125,8 +127,8 @@ PLAYWRIGHT_LAUNCH_OPTIONS = {
 
 # Increase default Playwright timeouts for page navigation and command execution.
 # Dynamic pages with many elements or slow loading times benefit from longer timeouts.
-PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 120000 # 2 minutes (for page load events)
-PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT = 120000    # 2 minutes (for individual Playwright actions like click, wait_for_selector)
+PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 180000 # 3 minutes (for page load events) - Increased for consistency with scraper.py
+PLAYWRIGHT_DEFAULT_COMMAND_TIMEOUT = 180000    # 3 minutes (for individual Playwright actions like click, wait_for_selector) - Increased for consistency with scraper.py
 
 # =============================================================================
 # Logging
