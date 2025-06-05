@@ -1,7 +1,7 @@
 import json
 import logging
 from itemadapter import ItemAdapter
-from scrapy.utils.project import get_project_settings # This might not be needed anymore if queue is passed directly
+# from scrapy.utils.project import get_project_settings # This might not be needed anymore if queue is passed directly
 
 logger = logging.getLogger(__name__)
 
