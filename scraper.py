@@ -65,263 +65,189 @@ class ScrapedItem(Item):
     raw_data = Field()
     error = Field()
 
-class GenericSpider(Spider): # Changed from CrawlSpider
-    name = 'generic_spider'
-    # custom_settings will be overridden by the Settings object passed to CrawlerRunner
-    # but it's good practice to keep common settings here for readability if needed
-    # (though in our setup, settings are built dynamically in _run_scrapy_spider_async)
+# Re-import GenericSpider to ensure it's from the correct path
+from my_scraper_project.spiders.generic_spider import GenericSpider
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.scrape_mode = kwargs.get('scrape_mode', 'beautify')
-        self.user_query = kwargs.get('user_query', '')
-        self.domain = kwargs.get('domain', '')
-        self.proxy_enabled = kwargs.get('proxy_enabled', False)
-        self.captcha_solver_enabled = kwargs.get('captcha_solver_enabled', False)
-        
-        self.results_queue = kwargs.get('results_queue', None)
 
-        if self.start_urls:
-            parsed_start_url = urlparse(self.start_urls[0])
-            self.domain = parsed_start_url.netloc
-            self.allowed_domains = [self.domain] if self.domain else []
+# --- Twisted Reactor Management ---
 
-    def start_requests(self):
-        for url in self.start_urls:
-            # Added 'wait_until': 'networkidle' to meta for Playwright
-            yield Request(url, meta={'playwright': {'wait_until': 'networkidle'}}, callback=self.parse_item)
+def _start_reactor_thread():
+    """Starts the Twisted reactor in a new thread if it's not already running."""
+    global _reactor_thread, _reactor_deferred
+    with _reactor_lock:
+        if _reactor_thread is None or not _reactor_thread.is_alive():
+            logger.info("Starting Twisted reactor in a new thread.")
+            _reactor_deferred = Deferred() # Create a new deferred for this run
+            _reactor_thread = threading.Thread(target=_run_reactor_blocking, args=(_reactor_deferred,), daemon=True)
+            _reactor_thread.start()
+        else:
+            logger.info("Twisted reactor thread is already running.")
 
-    async def parse_item(self, response):
-        item = ScrapedItem()
-        item['url'] = response.url
-        item['error'] = None
+def _run_reactor_blocking(d):
+    """Function to run the reactor in a blocking manner in a separate thread."""
+    try:
+        reactor.run(installSignalHandlers=False) # Don't install signal handlers in a sub-thread
+    except Exception as e:
+        logger.error(f"Error running reactor: {e}")
+    finally:
+        # This will fire the deferred when reactor stops, signaling completion
+        if not d.called:
+            d.callback(None)
+        logger.info("Twisted reactor thread stopped.")
 
-        if self.scrape_mode == 'raw':
-            # Changed to await page.content() to ensure all dynamic content is included
-            page = response.playwright_page
-            item['raw_data'] = await page.content()
-            await page.close()
-            yield item
-            return
+@inlineCallbacks
+def _run_scrapy_spider_async(start_urls, scrape_mode='beautify', user_query='', proxy_enabled=False, captcha_solver_enabled=False):
+    """
+    Asynchronously runs the Scrapy spider and collects results.
+    This function must be called from within the Twisted reactor's thread.
+    """
+    settings = Settings()
+    # Assuming 'my_scraper_project' is the root of your Scrapy project
+    # and settings.py is directly inside it.
+    settings_module = 'my_scraper_project.settings' 
+    settings.setmodule(settings_module, priority='project')
 
+    # Pass the queue to the spider via custom_settings, then retrieve it in the pipeline
+    # NOTE: The queue itself cannot be pickled, so we pass it during spider init.
+    # The pipeline will then access it from the spider instance.
+    settings.set('ITEM_PIPELINES', {
+        'scraper.JsonWriterPipeline': 300, # Reference the pipeline directly from scraper.py
+    }, priority='cmdline') # Use high priority to ensure it overrides project settings
+
+    runner = CrawlerRunner(settings)
+    
+    # Pass results_queue directly during spider instantiation
+    deferred = runner.crawl(
+        GenericSpider,
+        start_urls=start_urls,
+        scrape_mode=scrape_mode,
+        user_query=user_query,
+        proxy_enabled=proxy_enabled,
+        captcha_solver_enabled=captcha_solver_enabled,
+        results_queue=_scrapy_results_queue # Pass the queue here
+    )
+    
+    yield deferred # Wait for the crawl to finish
+
+    # Signal that the crawl is complete
+    logger.info("Scrapy crawl finished for current request.")
+
+def _stop_reactor_thread():
+    """Stops the Twisted reactor if it's running."""
+    global _reactor_deferred
+    with _reactor_lock:
+        if reactor.running:
+            logger.info("Stopping Twisted reactor.")
+            # Call stop() in the reactor's thread to avoid cross-thread issues
+            reactor.callFromThread(reactor.stop)
+            
+            # Wait for the deferred to fire, indicating reactor has truly stopped
+            if _reactor_deferred and not _reactor_deferred.called:
+                # Use threads.blockingCallFromThread if you need to block the
+                # current thread until the reactor stops.
+                # For most cases, just letting the deferred be called is enough.
+                logger.info("Waiting for reactor shutdown deferred.")
+                _reactor_deferred.addErrback(lambda fail: logger.error(f"Reactor shutdown error: {fail.value}"))
+                return defer.DeferredList([_reactor_deferred])
+            else:
+                logger.info("Reactor deferred already called or not set.")
+                return defer.succeed(None)
+        else:
+            logger.info("Twisted reactor is not running.")
+            return defer.succeed(None) # Return an immediately successful deferred
+
+
+# --- Public API for scraping ---
+
+def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = '', proxy_enabled: bool = False, captcha_solver_enabled: bool = False) -> list:
+    """
+    Initiates a Scrapy crawl for a single URL and returns the results.
+    The scrape_mode can be 'beautify' (default) for parsed content or 'raw' for raw HTML.
+    """
+    _start_reactor_thread() # Ensure reactor is running
+
+    results = []
+    # Clear the queue before starting a new scrape
+    while not _scrapy_results_queue.empty():
         try:
-            # Access the Playwright page object
-            page = response.playwright_page
-            
-            # Get the full rendered HTML content after Playwright has processed the page
-            rendered_html = await page.content()
-            soup = BeautifulSoup(rendered_html, 'html.parser')
-            
-            # --- Generalized content extraction ---
-            scraped_content = {}
+            _scrapy_results_queue.get_nowait()
+        except queue.Empty:
+            pass
 
-            # 1. Page Metadata
-            scraped_content["metadata"] = {
-                "title": soup.title.get_text(strip=True) if soup.title else None,
-                "description": soup.find("meta", attrs={"name": "description"})["content"] if soup.find("meta", attrs={"name": "description"}) else None,
-                "keywords": soup.find("meta", attrs={"name": "keywords"})["content"] if soup.find("meta", attrs={"name": "keywords"}) else None,
-                "og_title": soup.find("meta", attrs={"property": "og:title"})["content"] if soup.find("meta", attrs={"property": "og:title"}) else None,
-                "og_description": soup.find("meta", attrs={"property": "og:description"})["content"] if soup.find("meta", attrs={"property": "og:description"}) else None,
-                "canonical_url": soup.find("link", attrs={"rel": "canonical"})["href"] if soup.find("link", attrs={"rel": "canonical"}) else None,
-            }
+    # Call the spider run in the reactor's thread
+    d = threads.deferToThread(
+        _run_scrapy_spider_async,
+        start_urls=[url],
+        scrape_mode=scrape_mode,
+        user_query=user_query,
+        proxy_enabled=proxy_enabled,
+        captcha_solver_enabled=captcha_solver_enabled
+    )
 
-            # 2. Extract visible text blocks from the initial page load
-            # This captures general content without hardcoding specific phrases
-            general_text_content = []
-            for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'div']):
-                text = tag.get_text(strip=True)
-                if text and len(text) > 10: # Only capture substantial text blocks
-                    general_text_content.append(text)
-            scraped_content["general_page_text"] = general_text_content
+    # This callback will run in the main thread once the crawl (and its deferred) completes
+    def collect_results(result):
+        logger.info("Scrapy crawl deferred completed. Collecting results.")
+        while not _scrapy_results_queue.empty():
+            results.append(_scrapy_results_queue.get())
+        logger.info(f"Collected {len(results)} items.")
+        return results
 
-            # 3. Dynamic Tab Content Extraction (Generalized)
-            dynamic_sections_data = []
+    def err_collect_results(failure):
+        logger.error(f"Scrapy crawl deferred failed: {failure}", exc_info=True)
+        # Collect any partial results if available
+        while not _scrapy_results_queue.empty():
+            results.append(_scrapy_results_queue.get())
+        return results # Return partial results even on error
 
-            # Find potential tab-like buttons. Common patterns:
-            # - Buttons within a div with a "tabs" class
-            # - Buttons with a "role=tab" attribute
-            # - Links within a "nav" or "ul" that change content
-            
-            # Let's try to find elements that look like tab buttons.
-            # This is still somewhat heuristic, but more general than hardcoded text.
-            # Focus on buttons or anchors in common tab structures
-            potential_tab_locators = page.locator("div[class*='tabs'] button, div[class*='nav'] button, [role='tab']")
-            
-            num_potential_tabs = await potential_tab_locators.count()
-            self.logger.info(f"Found {num_potential_tabs} potential tab elements.")
+    d.addCallbacks(collect_results, err_collect_results)
+    
+    # We need to block the current thread until the deferred completes,
+    # because the scraper function is synchronous from the caller's perspective.
+    # This must be done carefully to avoid blocking the reactor thread itself.
+    # The deferToThread ensures _run_scrapy_spider_async runs on reactor thread,
+    # and the result collection happens when d fires.
+    
+    # Use a threading.Event to signal completion in the main thread
+    completion_event = threading.Event()
+    final_results = []
+    final_error = None
 
-            for i in range(num_potential_tabs):
-                try:
-                    # Re-locate the button in each iteration to avoid stale element references
-                    current_tab_button = potential_tab_locators.nth(i)
-                    if not await current_tab_button.is_visible():
-                        self.logger.info(f"Skipping invisible tab button at index {i}.")
-                        continue
+    def on_crawl_complete(res):
+        nonlocal final_results
+        final_results = res
+        completion_event.set()
 
-                    tab_text = await current_tab_button.text_content()
-                    if not tab_text or len(tab_text.strip()) < 2:
-                        self.logger.info(f"Skipping tab button at index {i} with no meaningful text.")
-                        continue
+    def on_crawl_error(failure):
+        nonlocal final_error
+        final_error = failure
+        completion_event.set()
+    
+    d.addCallbacks(on_crawl_complete, on_crawl_error)
 
-                    tab_name = tab_text.strip()
-                    self.logger.info(f"Attempting to click tab: '{tab_name}'")
+    # Wait for the event, ensuring the main thread is blocked until crawl finishes
+    completion_event.wait(timeout=360) # Increased timeout to 6 minutes for potentially long crawls
 
-                    # Click the tab button
-                    await current_tab_button.click(timeout=10000)
+    if not completion_event.is_set():
+        logger.warning("Scrapy crawl did not complete within the allotted time. Partial results might be returned.")
 
-                    # Wait for network idle or a general indicator of content change.
-                    # This is crucial for dynamic content loaded after a click.
-                    await page.wait_for_load_state('networkidle', timeout=30000)
-                    
-                    # After clicking, get the updated content of the whole page
-                    updated_rendered_html = await page.content()
-                    updated_soup = BeautifulSoup(updated_rendered_html, 'html.parser')
-
-                    # Now, try to identify the main content area that likely changes.
-                    # This might involve looking for common content containers, or a general
-                    # scrape of the 'body' or 'main' tag after the click.
-                    # For maximum robustness, we'll re-scrape the whole visible content for the tab
-                    
-                    tab_specific_content_soup = updated_soup # Assuming the relevant content is now in the main body
-
-                    tab_sections = self._extract_content_from_soup(tab_specific_content_soup)
-
-                    dynamic_sections_data.append({
-                        "tab_name": tab_name,
-                        "content_sections": tab_sections
-                    })
-                except Exception as e:
-                    self.logger.warning(f"Could not scrape content for dynamic tab (index {i}): {e}")
-            
-            scraped_content["dynamic_tab_content"] = dynamic_sections_data
-
-            # 4. Main page content (structural)
-            # This is a broader, more generic scrape of the main page sections
-            main_page_sections = self._extract_content_from_soup(soup)
-            scraped_content["main_page_structured_content"] = main_page_sections
+    if final_error:
+        logger.error(f"Scrapy crawl completed with error: {final_error.value}")
+        # Optionally, re-raise the error or include it in results
+        # For now, we'll return collected results.
+        return final_results
+    return final_results
 
 
-            item['content'] = scraped_content
-            yield item
-
-        except Exception as e:
-            self.logger.error(f"Error parsing HTML for {response.url}: {e}", exc_info=True)
-            item['error'] = str(e)
-            yield item
-        finally:
-            if 'playwright_page' in response.meta:
-                await response.meta["playwright_page"].close()
-
-    def _extract_content_from_soup(self, soup_obj):
-        """Helper method to extract structured content from a BeautifulSoup object."""
-        extracted_blocks = []
-
-        # Iterate over common semantic elements and generic divs that might contain content
-        for element in soup_obj.find_all(['header', 'nav', 'main', 'article', 'section', 'aside', 'footer', 'div', 'span', 'body']):
-            block_data = {
-                "tag": element.name,
-                "classes": element.get('class', []),
-                "id": element.get('id', None),
-                "attributes": {k: v for k, v in element.attrs.items() if k not in ['class', 'id']}, # Capture other attributes
-                "text_content": element.get_text(strip=True)[:500] if element.get_text(strip=True) else None, # Snippet of text
-                "headings": [],
-                "paragraphs": [],
-                "lists": [],
-                "tables": [],
-                "images": [],
-                "links": [],
-                "forms": []
-            }
-            
-            # Headings
-            for h in element.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
-                text = h.get_text(strip=True)
-                if text:
-                    block_data["headings"].append({"tag": h.name, "text": text})
-
-            # Paragraphs
-            for p in element.find_all('p'):
-                text = p.get_text(strip=True)
-                if text:
-                    block_data["paragraphs"].append(text)
-
-            # Lists
-            for list_tag in element.find_all(['ul', 'ol', 'dl']):
-                list_items = []
-                if list_tag.name in ['ul', 'ol']:
-                    for li in list_tag.find_all('li'):
-                        text = li.get_text(strip=True)
-                        if text:
-                            list_items.append(text)
-                elif list_tag.name == 'dl':
-                    for dt, dd in zip(list_tag.find_all('dt'), list_tag.find_all('dd')):
-                        dt_text = dt.get_text(strip=True)
-                        dd_text = dd.get_text(strip=True)
-                        if dt_text or dd_text:
-                            list_items.append({"term": dt_text, "description": dd_text})
-                if list_items:
-                    block_data["lists"].append({"type": list_tag.name, "items": list_items})
-
-            # Tables
-            for table in element.find_all('table'):
-                table_data = []
-                headers = [th.get_text(strip=True) for th in table.find_all('th')]
-                rows = []
-                for tr in table.find_all('tr'):
-                    row_cells = [td.get_text(strip=True) for td in tr.find_all('td')]
-                    if row_cells:
-                        rows.append(row_cells)
-                block_data["tables"].append({"headers": headers, "rows": rows})
-
-            # Images
-            for img in element.find_all('img'):
-                src = img.get('src')
-                alt = img.get('alt')
-                if src:
-                    abs_src = urljoin(self.start_urls[0] if self.start_urls else '', src)
-                    block_data["images"].append({"src": abs_src, "alt": alt})
-
-            # Links
-            for a in element.find_all('a'):
-                href = a.get('href')
-                text = a.get_text(strip=True)
-                if href:
-                    abs_href = urljoin(self.start_urls[0] if self.start_urls else '', href)
-                    block_data["links"].append({"href": abs_href, "text": text})
-
-            # Forms
-            for form in element.find_all('form'):
-                form_data = {
-                    "action": form.get('action'),
-                    "method": form.get('method'),
-                    "inputs": []
-                }
-                for input_field in form.find_all(['input', 'textarea', 'select']):
-                    input_info = {
-                        "tag": input_field.name,
-                        "name": input_field.get('name'),
-                        "type": input_field.get('type') if input_field.name == 'input' else None,
-                        "value": input_field.get('value') if input_field.name == 'input' else input_field.get_text(strip=True),
-                        "placeholder": input_field.get('placeholder'),
-                        "label": input_field.find_previous_sibling('label').get_text(strip=True) if input_field.find_previous_sibling('label') else None
-                    }
-                    if input_field.name == 'select':
-                        input_info['options'] = [opt.get_text(strip=True) for opt in input_field.find_all('option')]
-                    form_data["inputs"].append(input_info)
-                block_data["forms"].append(form_data)
-
-            # Only add block if it contains meaningful data
-            if any([block_data["headings"], block_data["paragraphs"], block_data["lists"], 
-                    block_data["tables"], block_data["images"], block_data["links"], 
-                    block_data["forms"]]) or (block_data["text_content"] and len(block_data["text_content"]) > 20):
-                extracted_blocks.append(block_data)
-        
-        return extracted_blocks
-
-
-    async def errback(self, failure):
-        self.logger.error(f"Error in Playwright request: {repr(failure)}")
-        request = failure.request
-        if 'playwright_page' in request.meta:
-            page = request.meta["playwright_page"]
-            await page.close()
+def crawl_website(start_url: str, depth: int = 1, scrape_mode: str = 'beautify', user_query: str = '', proxy_enabled: bool = False, captcha_solver_enabled: bool = False) -> list:
+    """
+    Initiates a broader Scrapy crawl, following links up to a specified depth.
+    NOTE: Link extraction logic needs to be integrated into GenericSpider's `parse` method
+    if you want to use a CrawlSpider-like behavior with depth.
+    For this current GenericSpider (which is a basic Spider), it only scrapes the start_url.
+    If you need actual depth-based crawling, GenericSpider would need to implement
+    rules similar to Scrapy's CrawlSpider, or you'd switch to CrawlSpider itself.
+    """
+    logger.warning("The current `GenericSpider` is a basic Spider and does not implement link following for depth. "
+                   "It will only scrape the `start_url` provided. To enable depth crawling, "
+                   "`GenericSpider` needs to be enhanced with `LinkExtractor` and rules, or converted to a `CrawlSpider`.")
+    return scrape_website(start_url, scrape_mode, user_query, proxy_enabled, captcha_solver_enabled)
