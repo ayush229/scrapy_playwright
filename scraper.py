@@ -13,6 +13,7 @@ from scrapy.item import Item, Field
 from scrapy import Request
 from twisted.internet import reactor, defer, threads
 from twisted.internet.defer import inlineCallbacks, Deferred
+from scrapy.utils.reactor import install_reactor # Import install_reactor
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +294,13 @@ def _start_reactor_thread():
 
     with _reactor_lock:
         if _reactor_thread is None or not _reactor_thread.is_alive():
+            # Ensure the AsyncioSelectorReactor is installed before running
+            try:
+                install_reactor("twisted.internet.asyncioreactor.AsyncioSelectorReactor")
+                logger.info("Installed AsyncioSelectorReactor.")
+            except Exception as e:
+                logger.warning(f"Could not install AsyncioSelectorReactor, it might already be installed or another reactor is running: {e}")
+
             # Create a Deferred that will fire when the reactor stops
             _reactor_deferred = Deferred()
             _reactor_thread = threading.Thread(target=_reactor_loop, daemon=True)
