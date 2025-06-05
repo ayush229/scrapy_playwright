@@ -44,9 +44,9 @@ class GenericSpider(Spider):
                     'playwright_page_methods': [
                         # Wait for the entire page to settle after initial JS execution.
                         PageMethod("wait_for_load_state", "networkidle"),
-                        # Wait for a prominent element on the landing page, like the "North" tab button.
-                        # This confirms the main interactive elements are loaded.
-                        PageMethod("wait_for_selector", "div.tabs_main button:has-text('North')", state="visible", timeout=15000),
+                        # A general wait for common interactive elements to be present,
+                        # like buttons or links within the body. This is a heuristic.
+                        PageMethod("wait_for_selector", "body > *:visible", state="attached", timeout=15000),
                     ],
                     'playwright_include_page': True,
                 },
@@ -63,200 +63,250 @@ class GenericSpider(Spider):
 
         try:
             if self.scrape_mode == 'raw':
+                # Get the full rendered HTML content after Playwright has processed the page
                 item['raw_data'] = await page.content()
                 yield item
                 await page.close()
                 return
 
-            # --- Beautify mode: Scrape initial dynamic content ---
-            # Refined selectors for the top section elements
-            try:
-                # "LIVE with Code GODARSHAN" - Targeting the container for this whole block
-                # The div has class 'top-left' and contains the "LIVE with" text and the button.
-                # Use a more specific locator for the 'GODARSHAN' part if needed, or get the whole text
-                live_content_block_locator = page.locator(".top-left")
-                await live_content_block_locator.wait_for(state='visible', timeout=5000)
-                live_content_block_text = await live_content_block_locator.text_content()
-                item['live_content'] = live_content_block_text.strip() if live_content_block_text else None
-            except Exception as e:
-                self.logger.warning(f"Could not find or extract 'LIVE with Code GODARSHAN' content: {e}")
-                item['live_content'] = None
+            # --- Beautify mode: Scrape all available content ---
+            scraped_content = {}
+
+            # Get the full rendered HTML content from the Playwright page
+            rendered_html = await page.content()
+            soup = BeautifulSoup(rendered_html, 'html.parser')
             
-            try:
-                # "Pick your next destination from these sacred sites" - Target the h2 directly
-                destination_text_locator = page.locator("h2:has-text('Pick your NEXT DESTINATION from these sacred sites')")
-                await destination_text_locator.wait_for(state='visible', timeout=5000)
-                destination_text_element = await destination_text_locator.text_content()
-                item['destination_text'] = destination_text_element.strip() if destination_text_element else None
-            except Exception as e:
-                self.logger.warning(f"Could not find or extract 'Pick your next destination' text: {e}")
-                item['destination_text'] = None
+            # 1. Page Metadata (Title, Meta Descriptions, etc.)
+            scraped_content["metadata"] = {
+                "title": soup.title.get_text(strip=True) if soup.title else None,
+                "description": soup.find("meta", attrs={"name": "description"})["content"] if soup.find("meta", attrs={"name": "description"}) else None,
+                "keywords": soup.find("meta", attrs={"name": "keywords"})["content"] if soup.find("meta", attrs={"name": "keywords"}) else None,
+                "og_title": soup.find("meta", attrs={"property": "og:title"})["content"] if soup.find("meta", attrs={"property": "og:title"}) else None,
+                "og_description": soup.find("meta", attrs={"property": "og:description"})["content"] if soup.find("meta", attrs={"property": "og:description"}) else None,
+                "canonical_url": soup.find("link", attrs={"rel": "canonical"})["href"] if soup.find("link", attrs={"rel": "canonical"}) else None,
+            }
 
-            # --- Handle tabs and their dynamic content ---
-            all_tab_content = []
+            # 2. General Page Structured Content (from initial load)
+            # This extracts content blocks from the main page body
+            scraped_content["main_page_structured_content"] = self._extract_content_from_soup(soup)
 
-            # Selector for the tab buttons (North, South, etc.)
-            # Based on the screenshot: div.tabs_main contains button elements.
-            tab_buttons_locators = page.locator("div.tabs_main button")
+            # 3. Dynamic Tab Content Extraction (Generalized)
+            dynamic_sections_data = []
 
-            num_tabs = await tab_buttons_locators.count()
-            self.logger.info(f"Found {num_tabs} potential tab buttons.")
+            # Find potential tab-like buttons. These are heuristics:
+            # - Buttons directly under a common "tabs" or "nav" class div
+            # - Elements with ARIA role="tab"
+            # - Buttons that might be within a section that looks like a tab bar (e.g., div with class containing "tabs" or "nav")
+            # This attempts to be general but might need fine-tuning for very unique tab UIs.
+            
+            # Prioritize elements with role="tab" as they are semantically correct for tabs.
+            # Fallback to buttons or anchors in common tab-like containers.
+            potential_tab_locators = page.locator("[role='tab'], div[class*='tab'] button, div[class*='nav'] button, div[class*='tab'] a, div[class*='nav'] a")
+            
+            num_potential_tabs = await potential_tab_locators.count()
+            self.logger.info(f"Found {num_potential_tabs} potential tab elements to interact with.")
 
-            for i in range(num_tabs):
-                tab_name = "Unknown" # Default in case text_content fails
-
+            for i in range(num_potential_tabs):
                 try:
                     # Re-locate the button in each iteration to avoid stale element references
-                    current_tab_button = tab_buttons_locators.nth(i)
-                    tab_name = await current_tab_button.text_content()
-                    self.logger.info(f"Processing tab: {tab_name.strip()} (index: {i})")
+                    # and to ensure we're always interacting with the current state of the DOM.
+                    current_tab_element = potential_tab_locators.nth(i)
+                    
+                    if not await current_tab_element.is_visible(timeout=5000):
+                        self.logger.info(f"Skipping invisible tab element at index {i}.")
+                        continue
+
+                    # Get text content; if no text, try aria-label or title
+                    tab_text = (await current_tab_element.text_content()).strip()
+                    if not tab_text:
+                        tab_text = await current_tab_element.get_attribute('aria-label') or await current_tab_element.get_attribute('title')
+                    
+                    if not tab_text or len(tab_text.strip()) < 2:
+                        self.logger.info(f"Skipping tab element at index {i} with no meaningful text or attributes.")
+                        continue
+
+                    tab_name = tab_text.strip()
+                    self.logger.info(f"Attempting to click dynamic tab: '{tab_name}' (index: {i})")
 
                     # Click the tab button
-                    await current_tab_button.click()
+                    await current_tab_element.click(timeout=10000)
 
-                    # CRUCIAL: Wait for the content specific to this tab to load/become visible.
-                    # The screenshot shows the content within `div.cli.data-content-tabsX.tabopen.active`.
-                    # Let's wait for a *specific* element *inside* the content, like `div.food-box`.
-                    # This ensures the new content has fully rendered.
-                    # The selector for the active tab content: `div.tabs-content.second-content div.cli.tabopen.active`
-                    # We then wait for a common element inside it, like `div.food-box`.
-                    await page.wait_for_selector(f"div.tabs-content.second-content div.cli.tabopen.active div.food-box", state="visible", timeout=20000)
-                    
-                    # Optional: Add a small delay if content truly takes time to settle visually
-                    # await asyncio.sleep(0.5) 
+                    # CRUCIAL: Wait for the new content to load or become stable after the click.
+                    # This waits for the network to be idle again and potentially a small delay for rendering.
+                    await page.wait_for_load_state('networkidle', timeout=30000)
+                    await asyncio.sleep(0.5) # Small buffer for rendering
 
-                    # Get the HTML of the currently active tab's content container.
-                    # This should capture the entire active tab's rendered content, including food-box divs.
-                    tab_content_container_html = await page.locator("div.tabs-content.second-content div.cli.tabopen.active").inner_html()
-                    
-                    # Parse the tab-specific HTML with BeautifulSoup to extract structured data
-                    tab_soup = BeautifulSoup(tab_content_container_html, 'html.parser')
-                    tab_sections = self._extract_content_from_soup(tab_soup)
+                    # After clicking, get the updated content of the *entire page*
+                    # because the dynamic content could be anywhere.
+                    updated_rendered_html = await page.content()
+                    updated_soup = BeautifulSoup(updated_rendered_html, 'html.parser')
 
-                    all_tab_content.append({
-                        "tab_name": tab_name.strip(),
-                        "content_sections": tab_sections
+                    # Extract structured content from the *entire updated page*.
+                    # The `_extract_content_from_soup` function will then identify and categorize content.
+                    tab_sections = self._extract_content_from_soup(updated_soup)
+
+                    dynamic_sections_data.append({
+                        "tab_name": tab_name,
+                        "content_on_tab_click": tab_sections
                     })
 
                 except Exception as e:
-                    self.logger.error(f"Error processing tab {i} ({tab_name.strip()}): {e}", exc_info=True)
-                    all_tab_content.append({
-                        "tab_name": tab_name.strip(),
+                    self.logger.warning(f"Could not scrape content for dynamic tab (index {i}, text '{tab_name}'): {e}", exc_info=True)
+                    dynamic_sections_data.append({
+                        "tab_name": tab_name if tab_name else f"Tab {i}",
                         "error": str(e)
                     })
-
-            # Combine all scraped content (initial page and tab contents)
-            item['content'] = {
-                "initial_live_content": item.pop('live_content', None),
-                "initial_destination_text": item.pop('destination_text', None),
-                "tabbed_content": all_tab_content
-            }
             
+            scraped_content["dynamic_tab_content"] = dynamic_sections_data
+
+            item['content'] = scraped_content
             yield item
 
         except Exception as e:
-            logger.error(f"An unhandled error occurred in parse_item for {response.url}: {e}", exc_info=True)
+            self.logger.error(f"An unhandled error occurred in parse_item for {response.url}: {e}", exc_info=True)
             item['error'] = str(e)
             yield item
         finally:
             if 'playwright_page' in response.meta:
                 await response.meta["playwright_page"].close()
 
-    def _extract_content_from_soup(self, soup):
-        """Helper method to extract structured content from a BeautifulSoup object."""
-        extracted_sections = []
-        
-        # Prioritize 'food-box' elements if they exist, based on your screenshot.
-        # This is where content like "Mandua Ki Roti" resides.
-        content_blocks = soup.select('div.food-box')
-        
-        if not content_blocks:
-            # Fallback to broader sections if no specific food-box found
-            content_blocks = soup.find_all(['section', 'div', 'article', 'main', 'body'])
-            if not content_blocks and soup.body:
-                content_blocks = [soup.body]
-            elif not content_blocks:
-                content_blocks = [soup] # Last resort: treat entire soup as one block
+    def _extract_content_from_soup(self, soup_obj):
+        """
+        Helper method to comprehensively extract structured content from a BeautifulSoup object.
+        It tries to identify common content blocks within a given soup.
+        """
+        extracted_blocks = []
 
-        for block in content_blocks:
-            section_data = {
-                "heading": None,
+        # Define a list of tags that typically contain meaningful content blocks
+        # Prioritize semantic HTML5 tags, then common structural divs/spans
+        content_block_tags = ['body', 'main', 'article', 'section', 'div', 'span']
+
+        for element in soup_obj.find_all(content_block_tags):
+            # Avoid processing elements that are likely script/style containers or empty
+            if element.name in ['script', 'style', 'noscript', 'meta', 'link', 'title'] or not element.get_text(strip=True):
+                continue
+            
+            # Simple heuristic to avoid very small or likely decorative elements if they're not
+            # explicitly a heading, paragraph, etc.
+            if element.name in ['div', 'span'] and len(element.get_text(strip=True)) < 50 and \
+               not any(element.find_all(['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'table', 'img', 'a', 'form'])):
+                continue
+
+            block_data = {
+                "tag": element.name,
+                "classes": element.get('class', []),
+                "id": element.get('id', None),
+                "attributes": {k: v for k, v in element.attrs.items() if k not in ['class', 'id', 'style']}, # Capture other relevant attributes
+                "text_snippet": element.get_text(strip=True)[:500] if element.get_text(strip=True) else None, # Snippet of text
+                "headings": [],
                 "paragraphs": [],
+                "lists": [],
+                "tables": [],
                 "images": [],
                 "links": [],
-                "list_items": [] # ADDED: To specifically capture list items like "Mandua Ki Roti"
+                "forms": [],
+                "structured_data": [] # For microdata, JSON-LD, etc., if needed (advanced)
             }
             
-            # Extract heading (e.g., Kashi Vishwanath Temple Varanasi)
-            # The screenshot shows h2 inside a div.main_offer.
-            # We'll check for h2 first, then other general headings.
-            main_heading = block.find('h2') # Direct H2 often means main heading
-            if main_heading and main_heading.get_text(strip=True):
-                section_data["heading"] = {"tag": main_heading.name, "text": main_heading.get_text(strip=True)}
-            else:
-                # Fallback to other heading tags if no h2
-                for tag_name in ['h1', 'h3', 'h4', 'h5', 'h6']:
-                    heading = block.find(tag_name)
-                    if heading and heading.get_text(strip=True):
-                        section_data["heading"] = { "tag": heading.name, "text": heading.get_text(strip=True) }
-                        break
-            
-            # Extract main paragraphs (like "Food to treat your taste buds")
-            # The screenshot shows a <p> tag within `div.food-text`
-            food_text_p = block.select_one('div.food-text p')
-            if food_text_p and food_text_p.get_text(strip=True):
-                section_data["paragraphs"].append(food_text_p.get_text(strip=True))
-            
-            # Also extract other generic paragraphs if they exist
-            other_paragraphs = block.find_all('p')
-            for p_tag in other_paragraphs:
-                text = p_tag.get_text(strip=True)
-                if text and len(text) > 5 and p_tag != food_text_p: # Avoid duplicating
-                    section_data["paragraphs"].append(text)
-
-
-            # Extract list items (like "Mandua Ki Roti")
-            # The screenshot shows <ul><li> for these items
-            list_items = block.find_all('li')
-            for li in list_items:
-                text = li.get_text(strip=True)
+            # Headings
+            for h in element.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                text = h.get_text(strip=True)
                 if text:
-                    section_data["list_items"].append(text)
+                    block_data["headings"].append({"tag": h.name, "text": text})
 
-            # Extract images (e.g., from food-img div)
-            for img in block.find_all("img"):
-                src = img.get("src")
+            # Paragraphs
+            for p in element.find_all('p'):
+                text = p.get_text(strip=True)
+                if text:
+                    block_data["paragraphs"].append(text)
+
+            # Lists
+            for list_tag in element.find_all(['ul', 'ol', 'dl']):
+                list_items = []
+                if list_tag.name in ['ul', 'ol']:
+                    for li in list_tag.find_all('li'):
+                        text = li.get_text(strip=True)
+                        if text:
+                            list_items.append(text)
+                elif list_tag.name == 'dl': # Definition lists
+                    for dt, dd in zip(list_tag.find_all('dt'), list_tag.find_all('dd')):
+                        dt_text = dt.get_text(strip=True)
+                        dd_text = dd.get_text(strip=True)
+                        if dt_text or dd_text:
+                            list_items.append({"term": dt_text, "description": dd_text})
+                if list_items:
+                    block_data["lists"].append({"type": list_tag.name, "items": list_items})
+
+            # Tables
+            for table in element.find_all('table'):
+                table_data = []
+                # Extract headers if available (from thead or th)
+                headers = [th.get_text(strip=True) for th in table.find_all('th')]
+                
+                rows = []
+                for tr in table.find_all('tr'):
+                    # Only get td, not th (if headers were already processed)
+                    row_cells = [cell.get_text(strip=True) for cell in tr.find_all(['td', 'th']) if cell.name == 'td' or not headers]
+                    if row_cells:
+                        rows.append(row_cells)
+                block_data["tables"].append({"headers": headers, "rows": rows})
+
+            # Images
+            for img in element.find_all('img'):
+                src = img.get('src')
+                alt = img.get('alt')
+                title = img.get('title')
                 if src:
-                    abs_url = urljoin(self.start_urls[0] if self.start_urls else '', src)
-                    section_data["images"].append(abs_url)
+                    abs_src = urljoin(self.start_urls[0] if self.start_urls else '', src)
+                    block_data["images"].append({"src": abs_src, "alt": alt, "title": title})
 
-            # Extract links
-            for a in block.find_all("a"):
-                href = a.get("href")
+            # Links
+            for a in element.find_all('a'):
+                href = a.get('href')
+                text = a.get_text(strip=True)
+                title = a.get('title')
                 if href:
                     abs_href = urljoin(self.start_urls[0] if self.start_urls else '', href)
-                    section_data["links"].append(abs_href)
+                    block_data["links"].append({"href": abs_href, "text": text, "title": title})
 
-            if section_data["heading"] or section_data["paragraphs"] or \
-               section_data["images"] or section_data["links"] or section_data["list_items"]:
-                extracted_sections.append(section_data)
+            # Forms and their input elements
+            for form in element.find_all('form'):
+                form_data = {
+                    "action": form.get('action'),
+                    "method": form.get('method'),
+                    "id": form.get('id'),
+                    "name": form.get('name'),
+                    "inputs": []
+                }
+                for input_field in form.find_all(['input', 'textarea', 'select']):
+                    input_info = {
+                        "tag": input_field.name,
+                        "name": input_field.get('name'),
+                        "id": input_field.get('id'),
+                        "type": input_field.get('type') if input_field.name == 'input' else None,
+                        "value": input_field.get('value') if input_field.name == 'input' else input_field.get_text(strip=True),
+                        "placeholder": input_field.get('placeholder'),
+                        "label_text": None # Will try to find an associated label
+                    }
+                    # Try to find an associated label using 'for' attribute or by proximity
+                    if input_field.get('id'):
+                        label_tag = soup_obj.find('label', attrs={'for': input_field.get('id')})
+                        if label_tag:
+                            input_info['label_text'] = label_tag.get_text(strip=True)
+                    if not input_info['label_text']: # Fallback to previous sibling label
+                        prev_sibling = input_field.find_previous_sibling('label')
+                        if prev_sibling:
+                            input_info['label_text'] = prev_sibling.get_text(strip=True)
+
+                    if input_field.name == 'select':
+                        input_info['options'] = [{"value": opt.get('value'), "text": opt.get_text(strip=True)} for opt in input_field.find_all('option')]
+                    form_data["inputs"].append(input_info)
+                block_data["forms"].append(form_data)
+
+            # Only add block if it contains meaningful data
+            if any([block_data["headings"], block_data["paragraphs"], block_data["lists"], 
+                    block_data["tables"], block_data["images"], block_data["links"], 
+                    block_data["forms"]]) or (block_data["text_snippet"] and len(block_data["text_snippet"]) > 20):
+                extracted_blocks.append(block_data)
         
-        # Final fallback if no structured content is found but there's some text
-        if not extracted_sections and soup.get_text(strip=True):
-            extracted_sections.append({
-                "heading": None,
-                "paragraphs": [soup.get_text(separator=' ', strip=True)],
-                "images": [],
-                "links": [],
-                "list_items": []
-            })
-        
-        return extracted_sections
-
-
-    async def errback(self, failure):
-        self.logger.error(f"Error in Playwright request: {repr(failure)}")
-        request = failure.request
-        if 'playwright_page' in request.meta:
-            page = request.meta["playwright_page"]
-            await page.close()
+        return extracted_blocks
