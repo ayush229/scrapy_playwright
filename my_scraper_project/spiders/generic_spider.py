@@ -33,7 +33,9 @@ class GenericSpider(scrapy.Spider):
         # Store scrape_mode and user_query if provided as spider arguments
         self.scrape_mode = kwargs.get('scrape_mode', 'beautify')
         self.user_query = kwargs.get('user_query', '')
-        self.proxy_enabled = kwargs.get('proxy_enabled', False)
+        
+        # Changed from proxy_enabled to proxy_url
+        self.proxy_url = kwargs.get('proxy_url', None) 
         self.captcha_solver_enabled = kwargs.get('captcha_solver_enabled', False)
         
         # Get the results_queue instance passed from the CrawlerRunner
@@ -43,22 +45,26 @@ class GenericSpider(scrapy.Spider):
     def start_requests(self):
         for url in self.start_urls:
             self.logger.info(f"Making Playwright request for: {url}")
+            meta_args = {
+                "playwright": True,
+                "playwright_include_page": True, # Keep the Playwright page object for dynamic interactions
+                # Add Playwright page methods for initial page load if needed, e.g., wait_for_selector
+                "playwright_page_methods": [
+                    # Wait for the network to be idle, meaning most requests are done
+                    PageMethod("wait_for_load_state", "networkidle"),
+                    # You can add more actions here if initial page needs interaction
+                    # PageMethod("click", "selector_for_cookie_banner"),
+                    # PageMethod("wait_for_selector", "body"),
+                ],
+                "captcha_solver": self.captcha_solver_enabled # Pass captcha setting
+            }
+            # Only add 'proxy' to meta if a proxy_url is provided
+            if self.proxy_url:
+                meta_args["proxy"] = self.proxy_url # Pass the proxy_url string
+
             yield scrapy.Request(
                 url,
-                meta={
-                    "playwright": True,
-                    "playwright_include_page": True, # Keep the Playwright page object for dynamic interactions
-                    # Add Playwright page methods for initial page load if needed, e.g., wait_for_selector
-                    "playwright_page_methods": [
-                        # Wait for the network to be idle, meaning most requests are done
-                        PageMethod("wait_for_load_state", "networkidle"),
-                        # You can add more actions here if initial page needs interaction
-                        # PageMethod("click", "selector_for_cookie_banner"),
-                        # PageMethod("wait_for_selector", "body"),
-                    ],
-                    "proxy": self.proxy_enabled, # Pass proxy setting
-                    "captcha_solver": self.captcha_solver_enabled # Pass captcha setting
-                },
+                meta=meta_args,
                 callback=self.parse,
                 errback=self.errback, # Ensure errback is correctly referenced
                 dont_filter=True # Essential if start_urls can be visited multiple times during development
