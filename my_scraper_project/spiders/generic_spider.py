@@ -1,3 +1,5 @@
+# generic_spider.py
+
 import scrapy
 from scrapy import Request, Spider
 from scrapy_playwright.page import PageMethod
@@ -71,15 +73,20 @@ class GenericSpider(Spider):
             try:
                 # "LIVE with Code GODARSHAN" - Targeting the container for this whole block
                 # The div has class 'top-left' and contains the "LIVE with" text and the button.
-                live_content_block = await page.locator(".top-left").text_content()
-                item['live_content'] = live_content_block.strip() if live_content_block else None
+                # Use a more specific locator for the 'GODARSHAN' part if needed, or get the whole text
+                live_content_block_locator = page.locator(".top-left")
+                await live_content_block_locator.wait_for(state='visible', timeout=5000)
+                live_content_block_text = await live_content_block_locator.text_content()
+                item['live_content'] = live_content_block_text.strip() if live_content_block_text else None
             except Exception as e:
                 self.logger.warning(f"Could not find or extract 'LIVE with Code GODARSHAN' content: {e}")
                 item['live_content'] = None
             
             try:
                 # "Pick your next destination from these sacred sites" - Target the h2 directly
-                destination_text_element = await page.locator("h2:has-text('Pick your NEXT DESTINATION')").text_content()
+                destination_text_locator = page.locator("h2:has-text('Pick your NEXT DESTINATION from these sacred sites')")
+                await destination_text_locator.wait_for(state='visible', timeout=5000)
+                destination_text_element = await destination_text_locator.text_content()
                 item['destination_text'] = destination_text_element.strip() if destination_text_element else None
             except Exception as e:
                 self.logger.warning(f"Could not find or extract 'Pick your next destination' text: {e}")
@@ -111,6 +118,8 @@ class GenericSpider(Spider):
                     # The screenshot shows the content within `div.cli.data-content-tabsX.tabopen.active`.
                     # Let's wait for a *specific* element *inside* the content, like `div.food-box`.
                     # This ensures the new content has fully rendered.
+                    # The selector for the active tab content: `div.tabs-content.second-content div.cli.tabopen.active`
+                    # We then wait for a common element inside it, like `div.food-box`.
                     await page.wait_for_selector(f"div.tabs-content.second-content div.cli.tabopen.active div.food-box", state="visible", timeout=20000)
                     
                     # Optional: Add a small delay if content truly takes time to settle visually
@@ -226,7 +235,7 @@ class GenericSpider(Spider):
                 href = a.get("href")
                 if href:
                     abs_href = urljoin(self.start_urls[0] if self.start_urls else '', href)
-                    section_data["links"].append(abs_url)
+                    section_data["links"].append(abs_href)
 
             if section_data["heading"] or section_data["paragraphs"] or \
                section_data["images"] or section_data["links"] or section_data["list_items"]:
