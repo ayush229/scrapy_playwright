@@ -41,10 +41,10 @@ class GenericSpider(Spider):
                     'playwright': True,
                     'playwright_page_methods': [
                         # Wait for the entire page to settle after initial JS execution.
-                        # This is a good general catch-all for dynamic content.
                         PageMethod("wait_for_load_state", "networkidle"),
-                        # Explicitly wait for the "Pick your next destination" section which signals content readiness
-                        PageMethod("wait_for_selector", "h2:has-text('Pick your NEXT DESTINATION')", state="visible", timeout=15000),
+                        # Wait for a prominent element on the landing page, like the "North" tab button.
+                        # This confirms the main interactive elements are loaded.
+                        PageMethod("wait_for_selector", "div.tabs_main button:has-text('North')", state="visible", timeout=15000),
                     ],
                     'playwright_include_page': True,
                 },
@@ -67,18 +67,18 @@ class GenericSpider(Spider):
                 return
 
             # --- Beautify mode: Scrape initial dynamic content ---
-            # Using precise selectors from your screenshot
+            # Refined selectors for the top section elements
             try:
-                # Scrape "LIVE with Code GODARSHAN"
-                # This grabs the text content of the div containing "LIVE with Code" and the button/div "GODARSHAN"
-                live_content_full = await page.locator(".top-left div:has-text('LIVE with')").text_content()
-                item['live_content'] = live_content_full.strip() if live_content_full else None
+                # "LIVE with Code GODARSHAN" - Targeting the container for this whole block
+                # The div has class 'top-left' and contains the "LIVE with" text and the button.
+                live_content_block = await page.locator(".top-left").text_content()
+                item['live_content'] = live_content_block.strip() if live_content_block else None
             except Exception as e:
                 self.logger.warning(f"Could not find or extract 'LIVE with Code GODARSHAN' content: {e}")
                 item['live_content'] = None
             
             try:
-                # Scrape "Pick your next destination from these sacred sites"
+                # "Pick your next destination from these sacred sites" - Target the h2 directly
                 destination_text_element = await page.locator("h2:has-text('Pick your NEXT DESTINATION')").text_content()
                 item['destination_text'] = destination_text_element.strip() if destination_text_element else None
             except Exception as e:
@@ -89,54 +89,50 @@ class GenericSpider(Spider):
             all_tab_content = []
 
             # Selector for the tab buttons (North, South, etc.)
-            # Assuming these are buttons or divs with specific classes forming the tabs
-            # The screenshot shows them as <button> tags with text content
-            tab_buttons_locators = page.locator("div.tabs_main button") # Adjust if not <button> or different parent
+            # Based on the screenshot: div.tabs_main contains button elements.
+            tab_buttons_locators = page.locator("div.tabs_main button")
 
-            # Get the count of tabs to iterate accurately
             num_tabs = await tab_buttons_locators.count()
             self.logger.info(f"Found {num_tabs} potential tab buttons.")
 
             for i in range(num_tabs):
+                tab_name = "Unknown" # Default in case text_content fails
+
                 try:
                     # Re-locate the button in each iteration to avoid stale element references
-                    tab_button = tab_buttons_locators.nth(i)
-                    tab_name = await tab_button.text_content()
+                    current_tab_button = tab_buttons_locators.nth(i)
+                    tab_name = await current_tab_button.text_content()
                     self.logger.info(f"Processing tab: {tab_name.strip()} (index: {i})")
 
                     # Click the tab button
-                    await tab_button.click()
+                    await current_tab_button.click()
 
                     # CRUCIAL: Wait for the content specific to this tab to load/become visible.
-                    # Based on screenshot: 'div.tabs-content.second-content' or 'div.cli.data-content-tabs<N>.tabopen.active'
-                    # The content itself appears in div.main_offer inside the active tab.
-                    # Let's wait for an element that is definitely inside the newly active tab's content.
-                    # A good strategy is to wait for the main content container *inside* the active tab.
-                    # The screenshot shows `div.cli.data-content-tabs2.tabopen.active` as the active tab content container.
-                    # We can target the main offer container inside the currently active tab.
-                    await page.wait_for_selector(f"div.tabs-content.second-content div.cli.tabopen.active div.main_offer", state="visible", timeout=20000)
+                    # The screenshot shows the content within `div.cli.data-content-tabsX.tabopen.active`.
+                    # Let's wait for a *specific* element *inside* the content, like `div.food-box`.
+                    # This ensures the new content has fully rendered.
+                    await page.wait_for_selector(f"div.tabs-content.second-content div.cli.tabopen.active div.food-box", state="visible", timeout=20000)
                     
                     # Optional: Add a small delay if content truly takes time to settle visually
                     # await asyncio.sleep(0.5) 
 
-                    # Get the HTML of the currently active tab's content
-                    # Target the specific content container within the active tab.
-                    tab_content_html = await page.locator("div.tabs-content.second-content div.cli.tabopen.active").inner_html()
+                    # Get the HTML of the currently active tab's content container.
+                    # This should capture the entire active tab's rendered content, including food-box divs.
+                    tab_content_container_html = await page.locator("div.tabs-content.second-content div.cli.tabopen.active").inner_html()
                     
                     # Parse the tab-specific HTML with BeautifulSoup to extract structured data
-                    tab_soup = BeautifulSoup(tab_content_html, 'html.parser')
+                    tab_soup = BeautifulSoup(tab_content_container_html, 'html.parser')
                     tab_sections = self._extract_content_from_soup(tab_soup)
 
                     all_tab_content.append({
-                        "tab_name": tab_name.strip() if tab_name else f"Tab {i+1}",
+                        "tab_name": tab_name.strip(),
                         "content_sections": tab_sections
                     })
 
                 except Exception as e:
-                    tab_name_current = await tab_buttons_locators.nth(i).text_content() if i < await tab_buttons_locators.count() else f"Unknown Tab {i+1}"
-                    self.logger.error(f"Error processing tab {i} ({tab_name_current.strip()}): {e}", exc_info=True)
+                    self.logger.error(f"Error processing tab {i} ({tab_name.strip()}): {e}", exc_info=True)
                     all_tab_content.append({
-                        "tab_name": tab_name_current.strip(),
+                        "tab_name": tab_name.strip(),
                         "error": str(e)
                     })
 
@@ -159,69 +155,94 @@ class GenericSpider(Spider):
 
     def _extract_content_from_soup(self, soup):
         """Helper method to extract structured content from a BeautifulSoup object."""
-        content_sections = []
+        extracted_sections = []
         
-        # Target common content-holding elements more precisely within the tab content
-        # Your screenshot shows content within `div.main_offer` inside the active tab
-        # Let's try to target those more specifically.
-        main_offer_divs = soup.select('div.main_offer') # Use select for CSS selector
+        # Prioritize 'food-box' elements if they exist, based on your screenshot.
+        # This is where content like "Mandua Ki Roti" resides.
+        content_blocks = soup.select('div.food-box')
+        
+        if not content_blocks:
+            # Fallback to broader sections if no specific food-box found
+            content_blocks = soup.find_all(['section', 'div', 'article', 'main', 'body'])
+            if not content_blocks and soup.body:
+                content_blocks = [soup.body]
+            elif not content_blocks:
+                content_blocks = [soup] # Last resort: treat entire soup as one block
 
-        if not main_offer_divs and soup.body:
-            sections = [soup.body]
-        elif not main_offer_divs:
-            sections = [soup] # Fallback to entire soup if no specific tags found
-        else:
-            sections = main_offer_divs
-
-        for sec in sections:
+        for block in content_blocks:
             section_data = {
                 "heading": None,
                 "paragraphs": [],
                 "images": [],
-                "links": []
+                "links": [],
+                "list_items": [] # ADDED: To specifically capture list items like "Mandua Ki Roti"
             }
             
-            heading_tags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
-            found_heading = None
-            for tag_name in heading_tags:
-                heading = sec.find(tag_name)
-                if heading and heading.get_text(strip=True):
-                    found_heading = { "tag": heading.name, "text": heading.get_text(strip=True) }
-                    break
-            section_data["heading"] = found_heading
-
-            # Focus on paragraph-like elements that contain substantial text
-            paragraphs = sec.find_all(['p', 'li', 'div'], string=lambda text: text and len(text.strip()) > 5)
-            for p in paragraphs:
-                text = p.get_text(strip=True)
-                if text:
+            # Extract heading (e.g., Kashi Vishwanath Temple Varanasi)
+            # The screenshot shows h2 inside a div.main_offer.
+            # We'll check for h2 first, then other general headings.
+            main_heading = block.find('h2') # Direct H2 often means main heading
+            if main_heading and main_heading.get_text(strip=True):
+                section_data["heading"] = {"tag": main_heading.name, "text": main_heading.get_text(strip=True)}
+            else:
+                # Fallback to other heading tags if no h2
+                for tag_name in ['h1', 'h3', 'h4', 'h5', 'h6']:
+                    heading = block.find(tag_name)
+                    if heading and heading.get_text(strip=True):
+                        section_data["heading"] = { "tag": heading.name, "text": heading.get_text(strip=True) }
+                        break
+            
+            # Extract main paragraphs (like "Food to treat your taste buds")
+            # The screenshot shows a <p> tag within `div.food-text`
+            food_text_p = block.select_one('div.food-text p')
+            if food_text_p and food_text_p.get_text(strip=True):
+                section_data["paragraphs"].append(food_text_p.get_text(strip=True))
+            
+            # Also extract other generic paragraphs if they exist
+            other_paragraphs = block.find_all('p')
+            for p_tag in other_paragraphs:
+                text = p_tag.get_text(strip=True)
+                if text and len(text) > 5 and p_tag != food_text_p: # Avoid duplicating
                     section_data["paragraphs"].append(text)
 
-            for img in sec.find_all("img"):
+
+            # Extract list items (like "Mandua Ki Roti")
+            # The screenshot shows <ul><li> for these items
+            list_items = block.find_all('li')
+            for li in list_items:
+                text = li.get_text(strip=True)
+                if text:
+                    section_data["list_items"].append(text)
+
+            # Extract images (e.g., from food-img div)
+            for img in block.find_all("img"):
                 src = img.get("src")
                 if src:
                     abs_url = urljoin(self.start_urls[0] if self.start_urls else '', src)
                     section_data["images"].append(abs_url)
 
-            for a in sec.find_all("a"):
+            # Extract links
+            for a in block.find_all("a"):
                 href = a.get("href")
                 if href:
                     abs_href = urljoin(self.start_urls[0] if self.start_urls else '', href)
-                    section_data["links"].append(abs_href)
+                    section_data["links"].append(abs_url)
 
-            if section_data["heading"] or section_data["paragraphs"] or section_data["images"] or section_data["links"]:
-                content_sections.append(section_data)
+            if section_data["heading"] or section_data["paragraphs"] or \
+               section_data["images"] or section_data["links"] or section_data["list_items"]:
+                extracted_sections.append(section_data)
         
         # Final fallback if no structured content is found but there's some text
-        if not content_sections and soup.get_text(strip=True):
-            content_sections.append({
+        if not extracted_sections and soup.get_text(strip=True):
+            extracted_sections.append({
                 "heading": None,
                 "paragraphs": [soup.get_text(separator=' ', strip=True)],
                 "images": [],
-                "links": []
+                "links": [],
+                "list_items": []
             })
         
-        return content_sections
+        return extracted_sections
 
 
     async def errback(self, failure):
