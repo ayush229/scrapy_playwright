@@ -1,32 +1,19 @@
 import scrapy
-# CHANGE: Import scrapy.Spider instead of CrawlSpider
-from scrapy import Request, Spider # Changed from CrawlSpider
-# REMOVED: LinkExtractor and Rule are no longer needed as we are not crawling
-# from scrapy.linkextractors import LinkExtractor
-# from scrapy.spiders import CrawlSpider, Rule
-from scrapy_playwright.page import PageMethod # ADDED: Import PageMethod for Playwright interactions
+from scrapy import Request, Spider
+from scrapy_playwright.page import PageMethod
 from urllib.parse import urlparse, urljoin
 import logging
 from bs4 import BeautifulSoup
-import asyncio # ADDED: Import asyncio for async operations
+import asyncio
 
 logger = logging.getLogger(__name__)
 
-# Import the item definition
 # Assuming 'my_scraper_project' is the root of your Scrapy project
 # and 'items.py' is inside 'my_scraper_project' directory
 from my_scraper_project.items import ScrapedItem
 
-
-# CHANGE: Inherit from scrapy.Spider
-class GenericSpider(Spider): # Changed from CrawlSpider
+class GenericSpider(Spider):
     name = 'generic_spider'
-    # allowed_domains will be set dynamically in __init__
-    
-    # REMOVED: rules attribute as scrapy.Spider does not use it for link following
-    # rules = (
-    #     Rule(LinkExtractor(deny_domains=['google.com', 'facebook.com', 'twitter.com', 'linkedin.com']), callback='parse_item', follow=True),
-    # )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -36,81 +23,63 @@ class GenericSpider(Spider): # Changed from CrawlSpider
         self.domain = kwargs.get('domain', '')
         self.proxy_enabled = kwargs.get('proxy_enabled', False)
         self.captcha_solver_enabled = kwargs.get('captcha_solver_enabled', False)
-        # Assuming results_queue is passed from _execute_scrapy_crawl
         self.results_queue = kwargs.get('results_queue', None)
 
-
-        # Set allowed_domains based on the first start_url
         if self.start_urls:
             parsed_start_url = urlparse(self.start_urls[0])
             self.domain = parsed_start_url.netloc
-            # allowed_domains are still useful for general Scrapy filtering,
-            # though less critical for a non-crawling spider.
             self.allowed_domains = [self.domain] if self.domain else []
             logger.info(f"Spider initialized with start_urls: {self.start_urls}, allowed_domains: {self.allowed_domains}")
-
-            # REMOVED: No need to update rules as they are no longer part of scrapy.Spider
-            # self.rules = (
-            #     Rule(LinkExtractor(allow_domains=self.allowed_domains, deny_domains=['google.com', 'facebook.com', 'twitter.com', 'linkedin.com']), callback='parse_item', follow=True),
-            # )
         else:
             logger.error("GenericSpider initialized without start_urls.")
 
     def start_requests(self):
         for url in self.start_urls:
-            # Tell Scrapy to use Playwright for this request
-            # and include PageMethod calls to wait for dynamic content
-            # Also, set playwright_include_page to True to access the page object in parse_item
             yield Request(
                 url,
                 meta={
                     'playwright': True,
                     'playwright_page_methods': [
-                        # ADDED: Wait for "LIVE with Code" element (replace with actual selector)
-                        # This ensures the main dynamic content is loaded.
-                        PageMethod("wait_for_selector", "YOUR_LIVE_CONTENT_SELECTOR", state="visible", timeout=10000),
-                        # ADDED: Wait for "Pick your next destination" element (replace with actual selector)
-                        PageMethod("wait_for_selector", "YOUR_DESTINATION_TEXT_SELECTOR", state="visible", timeout=10000),
-                        # You might also add: PageMethod("wait_for_load_state", "networkidle")
-                        # if the page takes time to settle after initial JS execution.
+                        # Wait for the entire page to settle after initial JS execution.
+                        # This is a good general catch-all for dynamic content.
+                        PageMethod("wait_for_load_state", "networkidle"),
+                        # Explicitly wait for the "Pick your next destination" section which signals content readiness
+                        PageMethod("wait_for_selector", "h2:has-text('Pick your NEXT DESTINATION')", state="visible", timeout=15000),
                     ],
-                    'playwright_include_page': True, # CRUCIAL: To get the Playwright page object in parse_item
+                    'playwright_include_page': True,
                 },
                 callback=self.parse_item,
-                errback=self.errback # ADDED: Error handling for Playwright requests
+                errback=self.errback
             )
 
-    # CHANGE: parse_item is now an async function
     async def parse_item(self, response):
         item = ScrapedItem()
         item['url'] = response.url
         item['error'] = None
 
-        try:
-            # Access the Playwright page object
-            page = response.meta["playwright_page"]
+        page = response.meta["playwright_page"]
 
+        try:
             if self.scrape_mode == 'raw':
-                # For raw mode, the full HTML including dynamic content is available via page.content()
                 item['raw_data'] = await page.content()
                 yield item
-                # Close the page after processing
                 await page.close()
                 return
 
             # --- Beautify mode: Scrape initial dynamic content ---
-            # Extract "LIVE with Code" and "Pick your next destination"
-            # REPLACE 'YOUR_LIVE_CONTENT_SELECTOR' and 'YOUR_DESTINATION_TEXT_SELECTOR'
-            # with the actual CSS selectors from the website.
+            # Using precise selectors from your screenshot
             try:
-                live_content_element = await page.locator("YOUR_LIVE_CONTENT_SELECTOR").text_content()
-                item['live_content'] = live_content_element.strip() if live_content_element else None
+                # Scrape "LIVE with Code GODARSHAN"
+                # This grabs the text content of the div containing "LIVE with Code" and the button/div "GODARSHAN"
+                live_content_full = await page.locator(".top-left div:has-text('LIVE with')").text_content()
+                item['live_content'] = live_content_full.strip() if live_content_full else None
             except Exception as e:
-                self.logger.warning(f"Could not find or extract 'LIVE with Code' content: {e}")
+                self.logger.warning(f"Could not find or extract 'LIVE with Code GODARSHAN' content: {e}")
                 item['live_content'] = None
             
             try:
-                destination_text_element = await page.locator("YOUR_DESTINATION_TEXT_SELECTOR").text_content()
+                # Scrape "Pick your next destination from these sacred sites"
+                destination_text_element = await page.locator("h2:has-text('Pick your NEXT DESTINATION')").text_content()
                 item['destination_text'] = destination_text_element.strip() if destination_text_element else None
             except Exception as e:
                 self.logger.warning(f"Could not find or extract 'Pick your next destination' text: {e}")
@@ -119,41 +88,40 @@ class GenericSpider(Spider): # Changed from CrawlSpider
             # --- Handle tabs and their dynamic content ---
             all_tab_content = []
 
-            # REPLACE 'YOUR_TAB_BUTTON_SELECTOR' with the CSS selector that matches all tab buttons
-            tab_buttons = await page.locator("YOUR_TAB_BUTTON_SELECTOR").all()
-            
-            if not tab_buttons:
-                self.logger.warning("No tab buttons found with the specified selector. Proceeding with static content.")
-                # If no tabs, proceed with initial HTML parsing as fallback or primary method
-                soup = BeautifulSoup(response.text, 'html.parser')
-                content_sections = self._extract_content_from_soup(soup)
-                item['content'] = { "sections": content_sections }
-                yield item
-                await page.close()
-                return
+            # Selector for the tab buttons (North, South, etc.)
+            # Assuming these are buttons or divs with specific classes forming the tabs
+            # The screenshot shows them as <button> tags with text content
+            tab_buttons_locators = page.locator("div.tabs_main button") # Adjust if not <button> or different parent
 
+            # Get the count of tabs to iterate accurately
+            num_tabs = await tab_buttons_locators.count()
+            self.logger.info(f"Found {num_tabs} potential tab buttons.")
 
-            for i, tab_button in enumerate(tab_buttons):
+            for i in range(num_tabs):
                 try:
+                    # Re-locate the button in each iteration to avoid stale element references
+                    tab_button = tab_buttons_locators.nth(i)
                     tab_name = await tab_button.text_content()
-                    self.logger.info(f"Clicking on tab: {tab_name} (index: {i})")
+                    self.logger.info(f"Processing tab: {tab_name.strip()} (index: {i})")
 
                     # Click the tab button
                     await tab_button.click()
 
                     # CRUCIAL: Wait for the content specific to this tab to load/become visible.
-                    # REPLACE 'YOUR_TAB_CONTENT_CONTAINER_SELECTOR'
-                    # This selector should target the *container* of the content that changes when tabs are clicked.
-                    # It might be an ID like '#tabContentArea' or a class like '.active-tab-panel'
-                    # You may need a more specific wait condition if content takes longer to render.
-                    await page.wait_for_selector("YOUR_TAB_CONTENT_CONTAINER_SELECTOR", state="visible", timeout=15000)
+                    # Based on screenshot: 'div.tabs-content.second-content' or 'div.cli.data-content-tabs<N>.tabopen.active'
+                    # The content itself appears in div.main_offer inside the active tab.
+                    # Let's wait for an element that is definitely inside the newly active tab's content.
+                    # A good strategy is to wait for the main content container *inside* the active tab.
+                    # The screenshot shows `div.cli.data-content-tabs2.tabopen.active` as the active tab content container.
+                    # We can target the main offer container inside the currently active tab.
+                    await page.wait_for_selector(f"div.tabs-content.second-content div.cli.tabopen.active div.main_offer", state="visible", timeout=20000)
                     
                     # Optional: Add a small delay if content truly takes time to settle visually
-                    # await asyncio.sleep(1) 
+                    # await asyncio.sleep(0.5) 
 
                     # Get the HTML of the currently active tab's content
-                    # Use inner_html() to get the HTML content of the container
-                    tab_content_html = await page.locator("YOUR_TAB_CONTENT_CONTAINER_SELECTOR").inner_html()
+                    # Target the specific content container within the active tab.
+                    tab_content_html = await page.locator("div.tabs-content.second-content div.cli.tabopen.active").inner_html()
                     
                     # Parse the tab-specific HTML with BeautifulSoup to extract structured data
                     tab_soup = BeautifulSoup(tab_content_html, 'html.parser')
@@ -165,27 +133,27 @@ class GenericSpider(Spider): # Changed from CrawlSpider
                     })
 
                 except Exception as e:
-                    self.logger.error(f"Error processing tab {i} ({tab_name}): {e}", exc_info=True)
+                    tab_name_current = await tab_buttons_locators.nth(i).text_content() if i < await tab_buttons_locators.count() else f"Unknown Tab {i+1}"
+                    self.logger.error(f"Error processing tab {i} ({tab_name_current.strip()}): {e}", exc_info=True)
                     all_tab_content.append({
-                        "tab_name": tab_name.strip() if tab_name else f"Tab {i+1}",
+                        "tab_name": tab_name_current.strip(),
                         "error": str(e)
                     })
 
             # Combine all scraped content (initial page and tab contents)
             item['content'] = {
-                "initial_live_content": item.pop('live_content', None), # Move this to the main content dict
-                "initial_destination_text": item.pop('destination_text', None), # Move this
+                "initial_live_content": item.pop('live_content', None),
+                "initial_destination_text": item.pop('destination_text', None),
                 "tabbed_content": all_tab_content
             }
             
             yield item
 
         except Exception as e:
-            logger.error(f"Error in parse_item for {response.url}: {e}", exc_info=True)
+            logger.error(f"An unhandled error occurred in parse_item for {response.url}: {e}", exc_info=True)
             item['error'] = str(e)
             yield item
         finally:
-            # Ensure the Playwright page is closed in all cases
             if 'playwright_page' in response.meta:
                 await response.meta["playwright_page"].close()
 
@@ -193,11 +161,17 @@ class GenericSpider(Spider): # Changed from CrawlSpider
         """Helper method to extract structured content from a BeautifulSoup object."""
         content_sections = []
         
-        sections = soup.find_all(['section', 'div', 'article', 'main', 'body'])
-        if not sections and soup.body:
+        # Target common content-holding elements more precisely within the tab content
+        # Your screenshot shows content within `div.main_offer` inside the active tab
+        # Let's try to target those more specifically.
+        main_offer_divs = soup.select('div.main_offer') # Use select for CSS selector
+
+        if not main_offer_divs and soup.body:
             sections = [soup.body]
-        elif not sections:
+        elif not main_offer_divs:
             sections = [soup] # Fallback to entire soup if no specific tags found
+        else:
+            sections = main_offer_divs
 
         for sec in sections:
             section_data = {
@@ -216,16 +190,16 @@ class GenericSpider(Spider): # Changed from CrawlSpider
                     break
             section_data["heading"] = found_heading
 
-            paragraphs = sec.find_all(['p', 'li', 'span', 'div']) # Include more tags for text
+            # Focus on paragraph-like elements that contain substantial text
+            paragraphs = sec.find_all(['p', 'li', 'div'], string=lambda text: text and len(text.strip()) > 5)
             for p in paragraphs:
                 text = p.get_text(strip=True)
-                if text and len(text) > 5: # Filter out very short or empty strings
+                if text:
                     section_data["paragraphs"].append(text)
 
             for img in sec.find_all("img"):
                 src = img.get("src")
                 if src:
-                    # urljoin correctly handles relative and absolute URLs
                     abs_url = urljoin(self.start_urls[0] if self.start_urls else '', src)
                     section_data["images"].append(abs_url)
 
@@ -251,7 +225,6 @@ class GenericSpider(Spider): # Changed from CrawlSpider
 
 
     async def errback(self, failure):
-        # Log and handle errors during Playwright requests
         self.logger.error(f"Error in Playwright request: {repr(failure)}")
         request = failure.request
         if 'playwright_page' in request.meta:
