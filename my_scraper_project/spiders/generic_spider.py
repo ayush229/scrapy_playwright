@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 import json
 import re
+import datetime # Import the datetime module
 
 # Assume ScrapedItem is defined in my_scraper_project.items
 # Make sure you have my_scraper_project/items.py with ScrapedItem definition
@@ -102,7 +103,7 @@ class GenericSpider(scrapy.Spider):
                 "description": soup.find('meta', attrs={'name': 'description'})['content'] if soup.find('meta', attrs={'name': 'description'}) else None,
                 "keywords": soup.find('meta', attrs={'name': 'keywords'})['content'] if soup.find('meta', attrs={'name': 'keywords'}) else None,
                 "url": response.url,
-                "timestamp": scrapy.utils.request.referrers.get_current_datetime().isoformat(),
+                "timestamp": datetime.datetime.now().isoformat(), # Corrected timestamp acquisition
                 "scrape_mode": self.scrape_mode,
                 "user_query": self.user_query
             },
