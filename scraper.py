@@ -95,17 +95,22 @@ def _run_reactor_blocking(d):
             d.callback(None)
         logger.info("Twisted reactor thread stopped.")
 
-def _run_scrapy_spider_submit_crawl(runner, spider_cls, start_urls, **kwargs):
+# Modified: Now accepts a deferred to fire upon crawl completion
+def _run_scrapy_spider_submit_crawl(completion_deferred, runner, spider_cls, start_urls, **kwargs):
     """
-    Submits the crawl to the runner. To be called within the reactor thread.
-    Returns the Deferred that fires when the crawl completes.
+    Submits the crawl to the runner and fires the provided completion_deferred when done.
+    This function must be called on the Twisted reactor thread.
     """
     logger.info("Submitting crawl to Scrapy CrawlerRunner.")
-    return runner.crawl(
+    d_crawl = runner.crawl(
         spider_cls,
         start_urls=start_urls,
         **kwargs
     )
+    # Chain the result of the crawl to the provided completion_deferred
+    d_crawl.addCallbacks(completion_deferred.callback, completion_deferred.errback)
+    return d_crawl # Return the internal Deferred for Scrapy's internal chaining
+
 
 def _stop_reactor_thread():
     """Stops the Twisted reactor if it's running."""
@@ -156,10 +161,16 @@ def scrape_website(url: str, scrape_mode: str = 'beautify', user_query: str = ''
 
     runner = CrawlerRunner(settings)
     
+    # NEW: Create a Deferred that will be fired when the crawl completes
+    crawl_completion_deferred = Deferred()
+
     # Schedule the actual crawl submission on the reactor thread
-    # The Deferred 'd' here will fire when the crawl started by runner.crawl completes.
-    d = reactor.callFromThread(
+    # The 'd' variable in scrape_website will now be this crawl_completion_deferred
+    d = crawl_completion_deferred # Assign the deferred here
+    
+    reactor.callFromThread(
         _run_scrapy_spider_submit_crawl,
+        crawl_completion_deferred, # Pass the deferred to be fired by _run_scrapy_spider_submit_crawl
         runner,
         GenericSpider,
         start_urls=[url],
