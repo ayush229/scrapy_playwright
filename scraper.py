@@ -1,3 +1,18 @@
+# Import install_reactor as the very first Twisted-related import
+from scrapy.utils.reactor import install_reactor
+
+# IMPORTANT: Install the reactor immediately when the module is loaded.
+# This must happen before any other Twisted components try to auto-select a reactor.
+try:
+    install_reactor("twisted.internet.asyncioreactor.AsyncioSelectorReactor")
+except Exception as e:
+    # This might happen if another part of the application or environment
+    # has already installed a reactor. Log a warning but proceed.
+    # On Railway, it's possible some underlying system initializes Twisted.
+    # However, this placement is the most robust for manual control.
+    print(f"WARNING: Could not install AsyncioSelectorReactor at module load: {e}. "
+          "It might already be installed or another reactor is running.")
+
 import requests
 from bs4 import BeautifulSoup
 import logging
@@ -13,7 +28,7 @@ from scrapy.item import Item, Field
 from scrapy import Request
 from twisted.internet import reactor, defer, threads
 from twisted.internet.defer import inlineCallbacks, Deferred
-from scrapy.utils.reactor import install_reactor # Import install_reactor
+
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +97,7 @@ class GenericSpider(CrawlSpider):
         # These settings are now largely handled by the settings object passed to CrawlerRunner
         # but you can use them here for spider-specific overrides if necessary.
         # Ensure your custom_settings are merged/applied correctly.
-        # The key is that `SCRAPY_RESULTS_QUEUE` is set in the `Settings` object passed to `CrawlerRunner`.
+        # The key is that `SCRAPY_RESULTS_QUEUE` is set in the `Settings` object passed to `CrawlerRunner'.
     def start_requests(self):
         for url in self.start_urls:
             yield Request(url, meta={'playwright': True}) # Request will be handled by Playwright
@@ -201,6 +216,7 @@ def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, ca
                 'http': 'scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler',
                 'https': 'scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler',
             },
+            # This TWISTED_REACTOR setting should now match the one installed at module level
             'TWISTED_REACTOR': 'twisted.internet.asyncioreactor.AsyncioSelectorReactor',
             'PLAYWRIGHT_LAUNCH_OPTIONS': {
                 'headless': True, # CRUCIAL for server environments
@@ -223,7 +239,6 @@ def _execute_scrapy_crawl(start_urls, scrape_mode, user_query, proxy_enabled, ca
                 'scraper.JsonWriterPipeline': 300,
             },
 
-            # 'SCRAPY_RESULTS_QUEUE': _scrapy_results_queue, # REMOVED: Do not pass unpicklable object in settings
             'FEEDS': {},
 
             # Headers for better compatibility
@@ -294,13 +309,7 @@ def _start_reactor_thread():
 
     with _reactor_lock:
         if _reactor_thread is None or not _reactor_thread.is_alive():
-            # Ensure the AsyncioSelectorReactor is installed before running
-            try:
-                install_reactor("twisted.internet.asyncioreactor.AsyncioSelectorReactor")
-                logger.info("Installed AsyncioSelectorReactor.")
-            except Exception as e:
-                logger.warning(f"Could not install AsyncioSelectorReactor, it might already be installed or another reactor is running: {e}")
-
+            # The install_reactor call is now at the module level, so no need to call it here.
             # Create a Deferred that will fire when the reactor stops
             _reactor_deferred = Deferred()
             _reactor_thread = threading.Thread(target=_reactor_loop, daemon=True)
